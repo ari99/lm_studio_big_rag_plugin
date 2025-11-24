@@ -1,0 +1,5 @@
+This is a plain text document.
+
+It contains intentional blank lines to ensure the parser preserves
+basic paragraph spacing without collapsing everything into a single line.
+

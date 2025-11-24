@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Build artifacts
+dist/
+*.tsbuildinfo
+
+# Logs
+*.log
+npm-debug.log*
+
+# OCR language packs and other large binaries
+eng.traineddata
+
+# Misc editor/system files
+.DS_Store
+*.swp
+*.swo
+node_modules/
+dist/
+*.log
+.DS_Store
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
