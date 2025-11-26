@@ -7,6 +7,7 @@ import { VectorStore, type DocumentChunk } from "../vectorstore/vectorStore";
 import { chunkText } from "../utils/textChunker";
 import { calculateFileHash } from "../utils/fileHash";
 import { type EmbeddingDynamicHandle, type LMStudioClient } from "@lmstudio/sdk";
+import { FailedFileRegistry } from "../utils/failedFileRegistry";
 
 export interface IndexingProgress {
   totalFiles: number;
@@ -15,6 +16,7 @@ export interface IndexingProgress {
   status: "scanning" | "indexing" | "complete" | "error";
   successfulFiles?: number;
   failedFiles?: number;
+  skippedFiles?: number;
   error?: string;
 }
 
@@ -35,6 +37,7 @@ type FileIndexOutcome =
 export interface IndexingOptions {
   documentsDir: string;
   vectorStore: VectorStore;
+  vectorStoreDir: string;
   embeddingModel: EmbeddingDynamicHandle;
   client: LMStudioClient;
   chunkSize: number;
@@ -90,10 +93,14 @@ export class IndexManager {
   private queue: PQueue;
   private options: IndexingOptions;
   private failureReasonCounts: Record<string, number> = {};
+  private failedFileRegistry: FailedFileRegistry;
 
   constructor(options: IndexingOptions) {
     this.options = options;
     this.queue = new PQueue({ concurrency: options.maxConcurrent });
+    this.failedFileRegistry = new FailedFileRegistry(
+      path.join(options.vectorStoreDir, ".big-rag-failures.json"),
+    );
   }
 
   /**
@@ -140,7 +147,7 @@ export class IndexManager {
         onProgress({
           totalFiles: files.length,
           processedFiles: 0,
-          currentFile: "",
+          currentFile: files[0]?.name ?? "",
           status: "indexing",
         });
       }
@@ -150,6 +157,18 @@ export class IndexManager {
         this.queue.add(async () => {
           let outcome: FileIndexOutcome = { type: "failed" };
           try {
+            if (onProgress) {
+              onProgress({
+                totalFiles: files.length,
+                processedFiles: processedCount,
+                currentFile: file.name,
+                status: "indexing",
+                successfulFiles: successCount,
+                failedFiles: failCount,
+                skippedFiles: skippedCount,
+              });
+            }
+
             outcome = await this.indexFile(file, fileInventory);
           } catch (error) {
             console.error(`Error indexing file ${file.path}:`, error);
@@ -187,6 +206,7 @@ export class IndexManager {
               status: "indexing",
               successfulFiles: successCount,
               failedFiles: failCount,
+              skippedFiles: skippedCount,
             });
           }
         })
@@ -202,6 +222,7 @@ export class IndexManager {
           status: "complete",
           successfulFiles: successCount,
           failedFiles: failCount,
+          skippedFiles: skippedCount,
         });
       }
 
@@ -252,9 +273,10 @@ export class IndexManager {
     const { vectorStore, embeddingModel, client, chunkSize, chunkOverlap, enableOCR, autoReindex } =
       this.options;
 
+    let fileHash: string | undefined;
     try {
       // Calculate file hash
-      const fileHash = await calculateFileHash(file.path);
+      fileHash = await calculateFileHash(file.path);
       const existingHashes = fileInventory.get(file.path);
       const hasSeenBefore = existingHashes !== undefined && existingHashes.size > 0;
       const hasSameHash = existingHashes?.has(fileHash) ?? false;
@@ -263,6 +285,16 @@ export class IndexManager {
       if (autoReindex && hasSameHash) {
         console.log(`File already indexed (skipped): ${file.name}`);
         return { type: "skipped" };
+      }
+
+      if (autoReindex) {
+        const previousFailure = await this.failedFileRegistry.getFailureReason(file.path, fileHash);
+        if (previousFailure) {
+          console.log(
+            `File previously failed (skipped): ${file.name} (reason=${previousFailure})`,
+          );
+          return { type: "skipped" };
+        }
       }
 
       // Wait before parsing to reduce WebSocket load
@@ -274,6 +306,9 @@ export class IndexManager {
       const parsedResult = await parseDocument(file.path, enableOCR, client);
       if (!parsedResult.success) {
         this.recordFailure(parsedResult.reason, parsedResult.details, file);
+        if (fileHash) {
+          await this.failedFileRegistry.recordFailure(file.path, fileHash, parsedResult.reason);
+        }
         return { type: "failed" };
       }
       const parsed = parsedResult.document;
@@ -283,6 +318,9 @@ export class IndexManager {
       if (chunks.length === 0) {
         console.log(`No chunks created from ${file.name}`);
         this.recordFailure("index.chunk-empty", "chunkText produced 0 chunks", file);
+        if (fileHash) {
+          await this.failedFileRegistry.recordFailure(file.path, fileHash, "index.chunk-empty");
+        }
         return { type: "failed" }; // Failed to chunk
       }
 
@@ -325,6 +363,9 @@ export class IndexManager {
           "All chunk embeddings failed, no document chunks",
           file,
         );
+        if (fileHash) {
+          await this.failedFileRegistry.recordFailure(file.path, fileHash, "index.chunk-empty");
+        }
         return { type: "failed" };
       }
 
@@ -336,6 +377,7 @@ export class IndexManager {
         } else {
           existingHashes.add(fileHash);
         }
+        await this.failedFileRegistry.clearFailure(file.path);
         return {
           type: "indexed",
           changeType: hasSeenBefore ? "updated" : "new",
@@ -347,6 +389,9 @@ export class IndexManager {
           error instanceof Error ? error.message : String(error),
           file,
         );
+        if (fileHash) {
+          await this.failedFileRegistry.recordFailure(file.path, fileHash, "index.vector-add-error");
+        }
         return { type: "failed" };
       }
     } catch (error) {
@@ -356,6 +401,9 @@ export class IndexManager {
             error instanceof Error ? error.message : String(error),
             file,
           );
+      if (fileHash) {
+        await this.failedFileRegistry.recordFailure(file.path, fileHash, "parser.unexpected-error");
+      }
       return { type: "failed" }; // Failed
     }
   }

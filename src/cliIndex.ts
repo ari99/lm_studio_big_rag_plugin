@@ -53,6 +53,7 @@ async function main() {
   const indexManager = new IndexManager({
     documentsDir,
     vectorStore,
+    vectorStoreDir,
     embeddingModel,
     client,
     chunkSize,
@@ -70,9 +71,10 @@ async function main() {
       } else if (progress.status === "indexing") {
         const success = progress.successfulFiles ?? 0;
         const failed = progress.failedFiles ?? 0;
+        const skipped = progress.skippedFiles ?? 0;
         console.log(
           `[BigRAG CLI] Indexing: ${progress.processedFiles}/${progress.totalFiles} files ` +
-            `(success=${success}, failed=${failed})`,
+            `(success=${success}, failed=${failed}, skipped=${skipped})`,
         );
       } else if (progress.status === "complete") {
         console.log(

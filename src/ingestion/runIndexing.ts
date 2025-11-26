@@ -61,6 +61,7 @@ export async function runIndexingJob({
   const indexManager = new IndexManager({
     documentsDir,
     vectorStore,
+    vectorStoreDir,
     embeddingModel,
     client,
     chunkSize,

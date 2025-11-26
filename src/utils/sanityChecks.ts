@@ -54,13 +54,24 @@ export async function performSanityChecks(
   // Check available memory
   const freeMemoryGB = os.freemem() / (1024 * 1024 * 1024);
   const totalMemoryGB = os.totalmem() / (1024 * 1024 * 1024);
-  
+  const runningOnMac = process.platform === "darwin";
+  const lowMemoryMessage =
+    `Low free memory: ${freeMemoryGB.toFixed(2)} GB of ${totalMemoryGB.toFixed(2)} GB total. ` +
+    "Consider reducing concurrent file processing.";
+  const veryLowMemoryMessage =
+    `Very low free memory: ${freeMemoryGB.toFixed(2)} GB. ` +
+    (runningOnMac
+      ? "macOS may be reporting cached pages as used; cached memory can usually be reclaimed automatically."
+      : "Indexing may fail due to insufficient RAM.");
+
   if (freeMemoryGB < 0.5) {
-    errors.push(`Very low free memory: ${freeMemoryGB.toFixed(2)} GB`);
+    if (runningOnMac) {
+      warnings.push(veryLowMemoryMessage);
+    } else {
+      errors.push(`Very low free memory: ${freeMemoryGB.toFixed(2)} GB`);
+    }
   } else if (freeMemoryGB < 2) {
-    warnings.push(
-      `Low free memory: ${freeMemoryGB.toFixed(2)} GB of ${totalMemoryGB.toFixed(2)} GB total. Consider reducing concurrent file processing.`
-    );
+    warnings.push(lowMemoryMessage);
   }
 
   // Estimate directory size (sample-based for performance)

@@ -27,6 +27,60 @@ function summarizeText(text: string, maxLines: number = 3, maxChars: number = 40
 let vectorStore: VectorStore | null = null;
 let lastIndexedDir = "";
 let sanityChecksPassed = false;
+
+async function warnIfContextOverflow(
+  ctl: PromptPreprocessorController,
+  finalPrompt: string,
+): Promise<void> {
+  try {
+    const tokenSource = await ctl.tokenSource();
+    if (
+      !tokenSource ||
+      !("applyPromptTemplate" in tokenSource) ||
+      typeof tokenSource.applyPromptTemplate !== "function" ||
+      !("countTokens" in tokenSource) ||
+      typeof tokenSource.countTokens !== "function" ||
+      !("getContextLength" in tokenSource) ||
+      typeof tokenSource.getContextLength !== "function"
+    ) {
+      console.warn("[BigRAG] Token source does not expose prompt utilities; skipping context check.");
+      return;
+    }
+
+    const [contextLength, history] = await Promise.all([
+      tokenSource.getContextLength(),
+      ctl.pullHistory(),
+    ]);
+    const historyWithLatestMessage = history.withAppended({
+      role: "user",
+      content: finalPrompt,
+    });
+    const formattedPrompt = await tokenSource.applyPromptTemplate(historyWithLatestMessage);
+    const promptTokens = await tokenSource.countTokens(formattedPrompt);
+
+    if (promptTokens > contextLength) {
+      const warningSummary =
+        `⚠️ Prompt needs ${promptTokens.toLocaleString()} tokens but model max is ${contextLength.toLocaleString()}.`;
+      console.warn("[BigRAG]", warningSummary);
+      ctl.createStatus({
+        status: "error",
+        text: `${warningSummary} Reduce retrieved passages or increase the model's context length.`,
+      });
+      try {
+        await ctl.client.system.notify({
+          title: "Context window exceeded",
+          description: `${warningSummary} Prompt may be truncated or rejected.`,
+          noAutoDismiss: true,
+        });
+      } catch (notifyError) {
+        console.warn("[BigRAG] Unable to send context overflow notification:", notifyError);
+      }
+    }
+  } catch (error) {
+    console.warn("[BigRAG] Failed to evaluate context usage:", error);
+  }
+}
+
 /**
  * Main prompt preprocessor function
  */
@@ -81,9 +135,13 @@ export async function preprocess(
         for (const error of sanityResult.errors) {
           console.error("[BigRAG]", error);
         }
+        const failureReason =
+          sanityResult.errors[0] ??
+          sanityResult.warnings[0] ??
+          "Unknown reason. Please review plugin settings.";
         checkStatus.setState({
           status: "canceled",
-          text: "Sanity checks failed. Please check configuration.",
+          text: `Sanity checks failed: ${failureReason}`,
         });
         return userMessage;
       }
@@ -162,10 +220,13 @@ export async function preprocess(
                   text: `Scanning: ${progress.currentFile}`,
                 });
               } else if (progress.status === "indexing") {
+                const success = progress.successfulFiles ?? 0;
+                const failed = progress.failedFiles ?? 0;
+                const skipped = progress.skippedFiles ?? 0;
                 indexStatus.setState({
                   status: "loading",
                   text: `Indexing: ${progress.processedFiles}/${progress.totalFiles} files ` +
-                    `(success=${progress.successfulFiles ?? 0}, failed=${progress.failedFiles ?? 0}) ` +
+                    `(success=${success}, failed=${failed}, skipped=${skipped}) ` +
                     `(${progress.currentFile})`,
                 });
               } else if (progress.status === "complete") {
@@ -328,6 +389,8 @@ export async function preprocess(
       text: `Final prompt sent to model (preview):\n${processedPreview}`,
     });
 
+    await warnIfContextOverflow(ctl, processedContent);
+
     return processedContent;
   } catch (error) {
     console.error("[PromptPreprocessor] Preprocessing failed.", error);
@@ -365,7 +428,8 @@ async function maybeHandleConfigTriggeredReindex({
   }
 
   const reminderText =
-    "Manual Reindex Trigger is ON. The index will be rebuilt each chat when 'Skip Previously Indexed Files' is OFF. If 'Skip Previously Indexed Files' is ON, the index will only be rebuilt for new or changed files.";
+    `Manual Reindex Trigger is ON. Skip Previously Indexed Files is currently ${skipPreviouslyIndexed ? "ON" : "OFF"}. ` +
+    "The index will be rebuilt each chat when 'Skip Previously Indexed Files' is OFF. If 'Skip Previously Indexed Files' is ON, the index will only be rebuilt for new or changed files.";
   console.info(`[BigRAG] ${reminderText}`);
   ctl.createStatus({
     status: "done",
@@ -406,10 +470,13 @@ async function maybeHandleConfigTriggeredReindex({
             text: `Scanning: ${progress.currentFile}`,
           });
         } else if (progress.status === "indexing") {
+          const success = progress.successfulFiles ?? 0;
+          const failed = progress.failedFiles ?? 0;
+          const skipped = progress.skippedFiles ?? 0;
           status.setState({
             status: "loading",
             text: `Indexing: ${progress.processedFiles}/${progress.totalFiles} files ` +
-              `(success=${progress.successfulFiles ?? 0}, failed=${progress.failedFiles ?? 0}) ` +
+              `(success=${success}, failed=${failed}, skipped=${skipped}) ` +
               `(${progress.currentFile})`,
           });
         } else if (progress.status === "complete") {
