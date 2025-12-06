@@ -1,0 +1,45 @@
+{
+  "name": "lms-plugin-big-rag",
+  "version": "1.0.0",
+  "description": "Large-scale RAG plugin for indexing gigabytes/terabytes of documents",
+  "homepage": "https://github.com/ari99/lm_studio_big_rag_plugin",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ari99/lm_studio_big_rag_plugin.git"
+  },
+  "main": "index.js",
+  "scripts": {
+    "dev": "lms dev",
+    "push": "lms push",
+    "build": "tsc",
+    "test": "npm run build && node --test dist/tests/parseDocument.test.js",
+    "index:cli": "node dist/cliIndex.js",
+    "index": "npm run build && node dist/cliIndex.js /Users/user/dev/new_cursor_projects/lmstudio_big_rag/data/original_data/gunsmithing_all /Users/user/dev/new_cursor_projects/lmstudio_big_rag/data/vectorstore"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@lmstudio/sdk": "^1.5.0",
+    "@napi-rs/canvas": "file:stubs/napi-rs-canvas",
+    "cheerio": "^1.0.0-rc.12",
+    "epub2": "^3.0.2",
+    "mime-types": "^2.1.35",
+    "p-queue": "^6.6.2",
+    "pdf-parse": "^1.1.1",
+    "pdfjs-dist": "^4.0.379",
+    "pngjs": "^7.0.0",
+    "tesseract.js": "^5.0.4",
+    "vectra": "^0.9.0",
+    "zod": "3.24.1"
+  },
+  "devDependencies": {
+    "@types/mime-types": "^2.1.4",
+    "@types/node": "^20.14.8",
+    "@types/pdf-parse": "^1.1.5",
+    "@types/pngjs": "^6.0.5",
+    "typescript": "^5.9.3"
+  },
+  "overrides": {
+    "@napi-rs/canvas": "file:stubs/napi-rs-canvas"
+  }
+}
