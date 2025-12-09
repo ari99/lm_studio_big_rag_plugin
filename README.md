@@ -66,9 +66,8 @@ The plugin provides the following configuration options in LM Studio:
 
 ### Reindexing Controls
 
-- **Manual Reindex Trigger** (toggle): Turn this ON and submit any chat message to force indexing to run on every chat session where the plugin is enabled. The plugin can’t change config values, so this toggle acts as the only “button” to rerun indexing. While it remains ON you’ll see a reminder in each chat letting you know whether a full rebuild or incremental update will occur. Flip it OFF once you’re done to stop the automatic reindex loop.
-- **Skip Previously Indexed Files** (default: true): Only appears when Manual Reindex Trigger is ON. If enabled, each manual run touches just the documents that are new or have changed since the last index; if disabled, every chat rebuilds the entire index from scratch. Combine these two controls to choose between incremental updates or repeated full refreshes.
-- **Chat Requests Disabled**: Direct chat prompts (e.g., “Please index my documents”) now return instructions to use the toggle; there is no longer a chat-accessible indexing tool.
+- **Manual Reindex Trigger** (toggle): Turn this ON and submit any chat message to force indexing to run on every chat session where the plugin is enabled. Flip it OFF once you’re done to stop the automatic reindex loop.
+- **Skip Previously Indexed Files** (default: true): If enabled while "Manual Reindex Trigger" is enabled, each manual run touches just the documents that are new or have changed since the last index; if disabled, every chat rebuilds the entire index from scratch. Combine "Skip Previously Indexed Files" and "Manual Reindex Trigger" to choose between incremental updates or repeated full refreshes.
 - **Automatic First-Run**: If the vector store is empty, the plugin automatically indexes the configured documents the first time any chat message is processed—no manual input is required.
 
 ## Usage
