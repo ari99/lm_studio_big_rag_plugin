@@ -51,8 +51,8 @@ This will start the plugin and register it with LM Studio.
 - Affinity Threshold: 0.5
 - Chunk Size: 512
 - Chunk Overlap: 100
-- Max Concurrent Files: 3
-- Enable OCR: false
+- Max Concurrent Files: 1
+- Enable OCR: true
 - Skip Previously Indexed Files: true (shows up only when Manual Reindex Trigger is ON; when checked the forced reindex only touches new/changed files, otherwise each chat performs a full rebuild)
 
 ### Step 5: Prepare Test Documents
