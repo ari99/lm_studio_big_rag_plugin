@@ -6,9 +6,9 @@ A powerful RAG (Retrieval-Augmented Generation) plugin for LM Studio that can in
 
 - **Massive Scale**: Designed to handle large document collections (GB to TB scale)
 - **Deep Directory Scanning**: Recursively scans all subdirectories
-- **Multiple File Formats**: Supports HTM, HTML, XHTML, PDF, EPUB, TXT, TEXT, Markdown variants (MD/MDX), BMP, JPEG, PNG
+- **Multiple File Formats**: Supports HTM, HTML, XHTML, PDF, EPUB, TXT, TEXT, Markdown variants (MD/MDX/MKDN), BMP, JPEG, PNG
 - **OCR Support**: Optional OCR for image files using Tesseract
-- **Vector Search**: Uses LanceDB for efficient vector storage and retrieval
+- **Vector Search**: Uses Vectra for efficient vector storage and retrieval
 - **Incremental Indexing**: Automatically detects and skips already-indexed files
 - **Concurrent Processing**: Configurable concurrency for optimal performance
 - **Persistent Storage**: Vector embeddings are stored locally and persist across sessions
@@ -16,7 +16,7 @@ A powerful RAG (Retrieval-Augmented Generation) plugin for LM Studio that can in
 ## Supported File Types
 
 - **Documents**: PDF, EPUB, TXT, TEXT
-- **Markdown**: MD, MDX, Markdown, MDown, MKD
+- **Markdown**: MD, MDX, Markdown, MDown, MKD, MKDN
 - **Web Content**: HTM, HTML, XHTML
 - **Images** (with OCR): BMP, JPEG, JPG, PNG
 - **Archives**: RAR (planned - currently not implemented)
@@ -61,8 +61,8 @@ The plugin provides the following configuration options in LM Studio:
 
 ### Performance Settings
 
-- **Max Concurrent Files** (1-10, default: 3): Number of files to process simultaneously
-- **Enable OCR** (default: false): Enable OCR for image files (slower but more comprehensive)
+- **Max Concurrent Files** (1-10, default: 1): Number of files to process simultaneously
+- **Enable OCR** (default: true): Enable OCR for image files and image-based PDFs using LM Studio's built-in document parser
 
 ### Reindexing Controls
 
@@ -106,7 +106,7 @@ The plugin provides the following configuration options in LM Studio:
    - `documentParser.ts`: Routes to appropriate parser
 
 3. **Vector Store** (`src/vectorstore/vectorStore.ts`):
-   - Uses LanceDB for vector storage
+   - Uses Vectra for vector storage
    - Supports incremental updates
    - Efficient similarity search
 
@@ -196,7 +196,7 @@ big-rag-plugin/
 │   │   ├── textParser.ts      # Text parsing
 │   │   └── imageParser.ts     # OCR parsing
 │   ├── vectorstore/
-│   │   └── vectorStore.ts     # LanceDB integration
+│   │   └── vectorStore.ts     # Vectra integration
 │   └── utils/
 │       ├── fileHash.ts        # File hashing
 │       └── textChunker.ts     # Text chunking
@@ -236,7 +236,7 @@ ISC
 ## Acknowledgments
 
 - Built using the LM Studio SDK
-- Uses LanceDB for vector storage
+- Uses Vectra for vector storage
 - OCR powered by Tesseract.js
 - PDF parsing via pdf-parse
 - EPUB parsing via epub2
