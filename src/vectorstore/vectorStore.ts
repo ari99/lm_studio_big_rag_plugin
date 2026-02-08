@@ -154,7 +154,7 @@ export class VectorStore {
     }
 
     try {
-      const results = await this.index.queryItems(queryVector, limit);
+      const results = await this.index.queryItems(queryVector, '', limit, undefined, false);
 
       return results
         .filter((result) => result.score >= threshold)
