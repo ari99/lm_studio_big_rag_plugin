@@ -9,6 +9,26 @@ import { tryStartIndexing, finishIndexing } from "./utils/indexingLock";
 import * as path from "path";
 import { runIndexingJob } from "./ingestion/runIndexing";
 
+/**
+ * Check the abort signal and throw if the request has been cancelled.
+ * This gives LM Studio the opportunity to stop the preprocessor promptly.
+ */
+function checkAbort(signal: AbortSignal): void {
+  if (signal.aborted) {
+    throw signal.reason ?? new DOMException("Aborted", "AbortError");
+  }
+}
+
+/**
+ * Returns true if the error is an abort/cancellation error that should be re-thrown.
+ */
+function isAbortError(error: unknown): boolean {
+  if (error instanceof DOMException && error.name === "AbortError") return true;
+  if (error instanceof Error && error.name === "AbortError") return true;
+  if (error instanceof Error && error.message === "Aborted") return true;
+  return false;
+}
+
 function summarizeText(text: string, maxLines: number = 3, maxChars: number = 400): string {
   const lines = text.split(/\r?\n/).filter(line => line.trim() !== "");
   const clippedLines = lines.slice(0, maxLines);
@@ -184,6 +204,8 @@ export async function preprocess(
       sanityChecksPassed = true;
     }
 
+    checkAbort(ctl.abortSignal);
+
     // Initialize vector store if needed
     if (!vectorStore || lastIndexedDir !== vectorStoreDir) {
       const status = ctl.createStatus({
@@ -204,6 +226,8 @@ export async function preprocess(
       });
     }
 
+    checkAbort(ctl.abortSignal);
+
     await maybeHandleConfigTriggeredReindex({
       ctl,
       documentsDir,
@@ -216,6 +240,8 @@ export async function preprocess(
       reindexRequested,
       skipPreviouslyIndexed: pluginConfig.get("manualReindex.skipPreviouslyIndexed"),
     });
+
+    checkAbort(ctl.abortSignal);
 
     // Check if we need to index
     const stats = await vectorStore.getStats();
@@ -287,6 +313,8 @@ export async function preprocess(
       }
     }
 
+    checkAbort(ctl.abortSignal);
+
     // Log manual reindex toggle states for visibility on each chat
     const toggleStatusText =
       `Manual Reindex Trigger: ${reindexRequested ? "ON" : "OFF"} | ` +
@@ -308,6 +336,8 @@ export async function preprocess(
       { signal: ctl.abortSignal }
     );
 
+    checkAbort(ctl.abortSignal);
+
     retrievalStatus.setState({
       status: "loading",
       text: "Searching for relevant content...",
@@ -315,6 +345,7 @@ export async function preprocess(
 
     // Embed the query
     const queryEmbeddingResult = await embeddingModel.embed(userPrompt);
+    checkAbort(ctl.abortSignal);
     const queryEmbedding = queryEmbeddingResult.embedding;
 
     // Search vector store
@@ -328,6 +359,7 @@ export async function preprocess(
       retrievalLimit,
       retrievalThreshold
     );
+    checkAbort(ctl.abortSignal);
     if (results.length > 0) {
       const topHit = results[0];
       console.info(
@@ -422,6 +454,11 @@ export async function preprocess(
 
     return finalPrompt;
   } catch (error) {
+    // IMPORTANT: Re-throw abort errors so LM Studio can stop the preprocessor promptly.
+    // Swallowing AbortError causes the "did not abort in time" warning.
+    if (isAbortError(error)) {
+      throw error;
+    }
     console.error("[PromptPreprocessor] Preprocessing failed.", error);
     return userMessage;
   }

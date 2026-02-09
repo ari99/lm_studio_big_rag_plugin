@@ -47,6 +47,7 @@ export interface IndexingOptions {
   autoReindex: boolean;
   parseDelayMs: number;
   failureReportPath?: string;
+  abortSignal?: AbortSignal;
   onProgress?: (progress: IndexingProgress) => void;
 }
 
@@ -133,6 +134,8 @@ export class IndexManager {
         }
       });
 
+      this.options.abortSignal?.throwIfAborted();
+
       console.log(`Found ${files.length} files to process`);
 
       // Step 2: Index files
@@ -152,9 +155,19 @@ export class IndexManager {
         });
       }
 
+      // Abort listener: when signal fires, clear pending tasks from the queue
+      const abortSignal = this.options.abortSignal;
+      const onAbort = () => this.queue.clear();
+      if (abortSignal) {
+        abortSignal.addEventListener("abort", onAbort, { once: true });
+      }
+
       // Process files in batches
       const tasks = files.map((file) =>
         this.queue.add(async () => {
+          // Check abort before processing each file
+          abortSignal?.throwIfAborted();
+
           let outcome: FileIndexOutcome = { type: "failed" };
           try {
             if (onProgress) {
@@ -213,6 +226,11 @@ export class IndexManager {
       );
 
       await Promise.all(tasks);
+
+      // Clean up abort listener
+      if (abortSignal) {
+        abortSignal.removeEventListener("abort", onAbort);
+      }
 
       if (onProgress) {
         onProgress({
@@ -330,6 +348,9 @@ export class IndexManager {
       for (let i = 0; i < chunks.length; i++) {
         const chunk = chunks[i];
         
+        // Check abort between chunk embeddings
+        this.options.abortSignal?.throwIfAborted();
+
         try {
           // Generate embedding
           const embeddingResult = await embeddingModel.embed(chunk.text);

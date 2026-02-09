@@ -19,6 +19,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@lancedb/lancedb": "^0.24.1",
     "@lmstudio/sdk": "^1.5.0",
     "@napi-rs/canvas": "file:stubs/napi-rs-canvas",
     "cheerio": "^1.0.0-rc.12",
@@ -31,6 +32,9 @@
     "tesseract.js": "^5.0.4",
     "vectra": "^0.12.3",
     "zod": "3.24.1"
+  },
+    "optionalDependencies": {
+    "@lancedb/lancedb-darwin-arm64": "^0.24.1"
   },
   "devDependencies": {
     "@types/mime-types": "^2.1.4",

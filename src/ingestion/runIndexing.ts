@@ -70,6 +70,7 @@ export async function runIndexingJob({
     enableOCR,
     autoReindex: forceReindex ? false : autoReindex,
     parseDelayMs,
+    abortSignal,
     onProgress,
   });
 

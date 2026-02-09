@@ -1,0 +1,256 @@
+import * as lancedb from "@lancedb/lancedb";
+import * as path from "path";
+import * as fs from "fs";
+
+const TABLE_NAME = "chunks";
+
+export interface DocumentChunk {
+  id: string;
+  text: string;
+  vector: number[];
+  filePath: string;
+  fileName: string;
+  fileHash: string;
+  chunkIndex: number;
+  metadata: Record<string, any>;
+}
+
+export interface SearchResult {
+  text: string;
+  score: number;
+  filePath: string;
+  fileName: string;
+  chunkIndex: number;
+  metadata: Record<string, any>;
+}
+
+type Connection = Awaited<ReturnType<typeof lancedb.connect>>;
+type Table = Awaited<ReturnType<Connection["openTable"]>>;
+
+export class VectorStore {
+  private db: Connection | null = null;
+  private table: Table | null = null;
+  private dbPath: string;
+  private updateMutex: Promise<void> = Promise.resolve();
+
+  constructor(dbPath: string) {
+    this.dbPath = path.resolve(dbPath);
+  }
+
+  /**
+   * Escape a string for use in a LanceDB SQL predicate (single-quoted literal).
+   */
+  private escapePredicateString(value: string): string {
+    return value.replace(/'/g, "''");
+  }
+
+  /**
+   * Initialize the vector store
+   */
+  async initialize(): Promise<void> {
+    try {
+      await fs.promises.mkdir(this.dbPath, { recursive: true });
+      this.db = await lancedb.connect(this.dbPath);
+      const names = await this.db.tableNames();
+      if (names.includes(TABLE_NAME)) {
+        this.table = await this.db.openTable(TABLE_NAME);
+      } else {
+        this.table = null;
+      }
+      console.log("Vector store initialized successfully");
+    } catch (error) {
+      console.error("Error initializing vector store:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Add document chunks to the vector store
+   * Uses a mutex to prevent concurrent updates
+   */
+  async addChunks(chunks: DocumentChunk[]): Promise<void> {
+    if (!this.db) {
+      throw new Error("Vector store not initialized");
+    }
+
+    if (chunks.length === 0) {
+      return;
+    }
+
+    const records = chunks.map((chunk) => ({
+      id: chunk.id,
+      vector: chunk.vector,
+      text: chunk.text,
+      filePath: chunk.filePath,
+      fileName: chunk.fileName,
+      fileHash: chunk.fileHash,
+      chunkIndex: chunk.chunkIndex,
+      ...chunk.metadata,
+    }));
+
+    this.updateMutex = this.updateMutex.then(async () => {
+      try {
+        if (!this.table) {
+          this.table = await this.db!.createTable(TABLE_NAME, records, {
+            mode: "create",
+          });
+        } else {
+          await this.table.add(records, { mode: "append" });
+        }
+        console.log(`Added ${chunks.length} chunks to vector store`);
+      } catch (error) {
+        console.error("Error adding chunks to vector store:", error);
+        throw error;
+      }
+    });
+
+    return this.updateMutex;
+  }
+
+  /**
+   * Search for similar chunks
+   */
+  async search(
+    queryVector: number[],
+    limit: number = 5,
+    threshold: number = 0.5,
+  ): Promise<SearchResult[]> {
+    if (!this.table) {
+      console.log("No index available for search");
+      return [];
+    }
+
+    try {
+      const raw = await this.table
+        .vectorSearch(queryVector)
+        .distanceType("cosine")
+        .limit(limit)
+        .toArray();
+
+      return raw
+        .map((row: Record<string, unknown>) => {
+          const dist = (row._distance as number) ?? 1;
+          const score = 1 - dist;
+          return { row, score };
+        })
+        .filter(({ score }) => score >= threshold)
+        .map(({ row, score }) => ({
+          text: row.text as string,
+          score,
+          filePath: row.filePath as string,
+          fileName: row.fileName as string,
+          chunkIndex: (row.chunkIndex as number) ?? 0,
+          metadata: row as Record<string, any>,
+        }));
+    } catch (error) {
+      console.error("Error searching vector store:", error);
+      return [];
+    }
+  }
+
+  /**
+   * Delete chunks for a specific file (by hash)
+   * Uses a mutex to prevent concurrent updates
+   */
+  async deleteByFileHash(fileHash: string): Promise<void> {
+    if (!this.table) {
+      return;
+    }
+
+    const escaped = this.escapePredicateString(fileHash);
+    const predicate = `fileHash = '${escaped}'`;
+
+    this.updateMutex = this.updateMutex.then(async () => {
+      try {
+        await this.table!.delete(predicate);
+        console.log(`Deleted chunks for file hash: ${fileHash}`);
+      } catch (error) {
+        console.error(`Error deleting chunks for file hash ${fileHash}:`, error);
+      }
+    });
+
+    return this.updateMutex;
+  }
+
+  /**
+   * Check if a file (by hash) exists in the store
+   */
+  async hasFile(fileHash: string): Promise<boolean> {
+    if (!this.table) {
+      return false;
+    }
+
+    try {
+      const escaped = this.escapePredicateString(fileHash);
+      const n = await this.table.countRows(`fileHash = '${escaped}'`);
+      return n > 0;
+    } catch (error) {
+      console.error(`Error checking file hash ${fileHash}:`, error);
+      return false;
+    }
+  }
+
+  /**
+   * Get a map of file paths to the set of hashes currently stored.
+   */
+  async getFileHashInventory(): Promise<Map<string, Set<string>>> {
+    const inventory = new Map<string, Set<string>>();
+    if (!this.table) {
+      return inventory;
+    }
+
+    try {
+      const rows = await this.table
+        .query()
+        .select(["filePath", "fileHash"])
+        .toArray();
+      for (const row of rows) {
+        const filePath = row.filePath as string | undefined;
+        const fileHash = row.fileHash as string | undefined;
+        if (!filePath || !fileHash) continue;
+        let hashes = inventory.get(filePath);
+        if (!hashes) {
+          hashes = new Set<string>();
+          inventory.set(filePath, hashes);
+        }
+        hashes.add(fileHash);
+      }
+      return inventory;
+    } catch (error) {
+      console.error("Error building file hash inventory:", error);
+      return inventory;
+    }
+  }
+
+  /**
+   * Get statistics about the vector store
+   */
+  async getStats(): Promise<{ totalChunks: number; uniqueFiles: number }> {
+    if (!this.table) {
+      return { totalChunks: 0, uniqueFiles: 0 };
+    }
+
+    try {
+      const totalChunks = await this.table.countRows();
+      const rows = await this.table.query().select(["fileHash"]).toArray();
+      const uniqueFiles = new Set(
+        rows.map((r: Record<string, string>) => r.fileHash).filter(Boolean),
+      ).size;
+      return { totalChunks, uniqueFiles };
+    } catch (error) {
+      console.error("Error getting stats:", error);
+      return { totalChunks: 0, uniqueFiles: 0 };
+    }
+  }
+
+  /**
+   * Close the vector store connection
+   */
+  async close(): Promise<void> {
+    if (this.db) {
+      this.db.close();
+    }
+    this.db = null;
+    this.table = null;
+  }
+}

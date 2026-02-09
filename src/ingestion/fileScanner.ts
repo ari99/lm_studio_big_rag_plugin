@@ -15,6 +15,12 @@ export interface ScannedFile {
   mtime: Date;
 }
 
+/** Normalize and validate the root directory for scanning (resolves path, strips trailing slashes). */
+function normalizeRootDir(rootDir: string): string {
+  const normalized = path.resolve(rootDir.trim()).replace(/\/+$/, "");
+  return normalized;
+}
+
 /**
  * Recursively scan a directory for supported files
  */
@@ -22,9 +28,21 @@ export async function scanDirectory(
   rootDir: string,
   onProgress?: (current: number, total: number) => void,
 ): Promise<ScannedFile[]> {
+  const root = normalizeRootDir(rootDir);
+  try {
+    await fs.promises.access(root, fs.constants.R_OK);
+  } catch (err: any) {
+    if (err?.code === "ENOENT") {
+      throw new Error(
+        `Documents directory does not exist: ${root}. Check the path (e.g. spelling and that the folder exists).`,
+      );
+    }
+    throw err;
+  }
+
   const files: ScannedFile[] = [];
   let scannedCount = 0;
-  
+
   const supportedExtensionsDescription = listSupportedExtensions().join(", ");
   console.log(`[Scanner] Supported extensions: ${supportedExtensionsDescription}`);
 
@@ -66,8 +84,8 @@ export async function scanDirectory(
     }
   }
   
-  await walk(rootDir);
-  
+  await walk(root);
+
   if (onProgress) {
     onProgress(scannedCount, files.length);
   }

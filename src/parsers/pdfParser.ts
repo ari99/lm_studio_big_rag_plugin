@@ -8,6 +8,7 @@ const MIN_TEXT_LENGTH = 50;
 const OCR_MAX_PAGES = 50;
 const OCR_MAX_IMAGES_PER_PAGE = 3;
 const OCR_MIN_IMAGE_AREA = 10_000;
+const OCR_MAX_IMAGE_PIXELS = 50_000_000; // ~7000x7000; prevents leptonica pixdata_malloc crashes
 const OCR_IMAGE_TIMEOUT_MS = 30_000;
 
 type PdfJsModule = typeof import("pdfjs-dist/legacy/build/pdf.mjs");
@@ -203,13 +204,41 @@ async function tryOcrWithPdfJs(filePath: string): Promise<StageResult> {
 
         const selectedImages = images.slice(0, OCR_MAX_IMAGES_PER_PAGE);
         for (const image of selectedImages) {
-          const {
-            data: { text },
-          } = await worker.recognize(image.buffer);
-          processedImages++;
-          const cleaned = cleanText(text || "");
-          if (cleaned.length > 0) {
-            textParts.push(cleaned);
+          try {
+            const {
+              data: { text },
+            } = await worker.recognize(image.buffer);
+            processedImages++;
+            const cleaned = cleanText(text || "");
+            if (cleaned.length > 0) {
+              textParts.push(cleaned);
+            }
+          } catch (recognizeError) {
+            console.warn(
+              `[PDF Parser] (OCR) Failed to recognize image (${image.width}x${image.height}) on page ${pageNum} of ${fileName}:`,
+              recognizeError instanceof Error ? recognizeError.message : recognizeError,
+            );
+            // The worker may have crashed; try to recreate it for remaining images
+            try {
+              await worker.terminate();
+            } catch {
+              // worker already dead, ignore
+            }
+            try {
+              worker = await createWorker("eng");
+            } catch (recreateError) {
+              console.error(
+                `[PDF Parser] (OCR) Failed to recreate OCR worker, aborting OCR for ${fileName}`,
+              );
+              worker = null;
+              return {
+                success: false,
+                reason: "pdf.ocr-error",
+                details: `Worker crashed and could not be recreated: ${
+                  recreateError instanceof Error ? recreateError.message : String(recreateError)
+                }`,
+              };
+            }
           }
         }
 
@@ -243,7 +272,9 @@ async function tryOcrWithPdfJs(filePath: string): Promise<StageResult> {
       }
     }
 
-    await worker.terminate();
+    if (worker) {
+      await worker.terminate();
+    }
     worker = null;
 
     const fullText = cleanText(textParts.join("\n\n"));
@@ -333,7 +364,16 @@ async function extractImagesForPage(pdfjsLib: PdfJsModule, page: any): Promise<E
   }
 
   return images
-    .filter((image) => image.area >= OCR_MIN_IMAGE_AREA)
+    .filter((image) => {
+      if (image.area < OCR_MIN_IMAGE_AREA) return false;
+      if (image.area > OCR_MAX_IMAGE_PIXELS) {
+        console.warn(
+          `[PDF Parser] (OCR) Skipping oversized image (${image.width}x${image.height} = ${image.area.toLocaleString()} pixels) to avoid memory allocation failure`,
+        );
+        return false;
+      }
+      return true;
+    })
     .sort((a, b) => b.area - a.area);
 }
 

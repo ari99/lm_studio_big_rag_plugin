@@ -8,7 +8,7 @@ A powerful RAG (Retrieval-Augmented Generation) plugin for LM Studio that can in
 - **Deep Directory Scanning**: Recursively scans all subdirectories
 - **Multiple File Formats**: Supports HTM, HTML, XHTML, PDF, EPUB, TXT, TEXT, Markdown variants (MD/MDX/MKDN), BMP, JPEG, PNG
 - **OCR Support**: Optional OCR for image files using Tesseract
-- **Vector Search**: Uses Vectra for efficient vector storage and retrieval
+- **Vector Search**: Uses Vectra with sharded indexes for efficient vector storage and retrieval (avoids single-file size limits)
 - **Incremental Indexing**: Automatically detects and skips already-indexed files
 - **Concurrent Processing**: Configurable concurrency for optimal performance
 - **Persistent Storage**: Vector embeddings are stored locally and persist across sessions
@@ -106,7 +106,7 @@ The plugin provides the following configuration options in LM Studio:
    - `documentParser.ts`: Routes to appropriate parser
 
 3. **Vector Store** (`src/vectorstore/vectorStore.ts`):
-   - Uses Vectra for vector storage
+   - Uses Vectra with sharded indexes (one shard in memory at a time; avoids V8 string size limits)
    - Supports incremental updates
    - Efficient similarity search
 
@@ -196,7 +196,7 @@ big-rag-plugin/
 │   │   ├── textParser.ts      # Text parsing
 │   │   └── imageParser.ts     # OCR parsing
 │   ├── vectorstore/
-│   │   └── vectorStore.ts     # Vectra integration
+│   │   └── vectorStore.ts     # Vectra sharded index integration
 │   └── utils/
 │       ├── fileHash.ts        # File hashing
 │       └── textChunker.ts     # Text chunking
@@ -236,7 +236,7 @@ ISC
 ## Acknowledgments
 
 - Built using the LM Studio SDK
-- Uses Vectra for vector storage
+- Uses Vectra for vector storage (sharded indexes)
 - OCR powered by Tesseract.js
 - PDF parsing via pdf-parse
 - EPUB parsing via epub2
