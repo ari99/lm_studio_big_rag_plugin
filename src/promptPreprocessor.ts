@@ -369,7 +369,7 @@ export async function preprocess(
       const docSummaries = results
         .map(
           (result, idx) =>
-            `#${idx + 1} file=${path.basename(result.filePath)} score=${result.score.toFixed(3)}`,
+            `#${idx + 1} file=${path.basename(result.filePath)} shard=${result.shardName} score=${result.score.toFixed(3)}`,
         )
         .join("\n");
       console.info(`[BigRAG] Relevant documents:\n${docSummaries}`);
@@ -428,7 +428,7 @@ export async function preprocess(
 
     const passagesLogEntries = results.map((result, idx) => {
       const fileName = path.basename(result.filePath);
-      return `#${idx + 1} file=${fileName} score=${result.score.toFixed(3)}\n${summarizeText(result.text)}`;
+      return `#${idx + 1} file=${fileName} shard=${result.shardName} score=${result.score.toFixed(3)}\n${summarizeText(result.text)}`;
     });
     const passagesLog = passagesLogEntries.join("\n\n");
 

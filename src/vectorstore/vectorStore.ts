@@ -23,6 +23,7 @@ export interface SearchResult {
   filePath: string;
   fileName: string;
   chunkIndex: number;
+  shardName: string;
   metadata: Record<string, any>;
 }
 
@@ -173,6 +174,7 @@ export class VectorStore {
           filePath: m?.filePath ?? "",
           fileName: m?.fileName ?? "",
           chunkIndex: m?.chunkIndex ?? 0,
+          shardName: dir,
           metadata: (r.item.metadata as Record<string, any>) ?? {},
         });
       }
