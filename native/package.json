@@ -1,0 +1,24 @@
+{
+  "name": "@bigrag/native",
+  "version": "1.0.0",
+  "description": "Native Rust performance module for BigRAG plugin",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "prepublishOnly": "napi prepublish -t npm"
+  },
+  "napi": {
+    "binaryName": "bigrag-native",
+    "targets": [
+      "x86_64-unknown-linux-gnu"
+    ]
+  },
+  "engines": {
+    "node": ">= 18"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.5.1"
+  }
+}

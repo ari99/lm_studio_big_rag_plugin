@@ -12,9 +12,18 @@
     "dev": "lms dev",
     "push": "lms push",
     "build": "tsc",
+    "build:native": "cd native && npm run build",
+    "build:all": "npm run build:native && npm run build",
     "test": "npm run build && node --test dist/tests/parseDocument.test.js",
+    "test:native": "npm run build && node --test dist/tests/native/*.test.js",
+    "test:all": "npm run build && node --test dist/tests/**/*.test.js",
     "index:cli": "node dist/cliIndex.js",
-    "index": "npm run build && node dist/cliIndex.js /Users/user/dev/new_cursor_projects/lmstudio_big_rag/data/original_data/gunsmithing_all /Users/user/dev/new_cursor_projects/lmstudio_big_rag/data/vectorstore"
+    "index": "npm run build && node dist/cliIndex.js /Users/user/dev/new_cursor_projects/lmstudio_big_rag/data/original_data/gunsmithing_all /Users/user/dev/new_cursor_projects/lmstudio_big_rag/data/vectorstore",
+    "bench": "npm run build && node --loader ts-node/esm benchmarks/runAll.ts",
+    "bench:hash": "npm run build && node --loader ts-node/esm benchmarks/hashBench.ts",
+    "bench:chunk": "npm run build && node --loader ts-node/esm benchmarks/chunkBench.ts",
+    "bench:scan": "npm run build && node --loader ts-node/esm benchmarks/scanBench.ts",
+    "bench:real": "npm run build && node dist/benchmarks/realWorldBench.js"
   },
   "author": "",
   "license": "ISC",
@@ -33,7 +42,7 @@
     "vectra": "^0.12.3",
     "zod": "3.24.1"
   },
-    "optionalDependencies": {
+  "optionalDependencies": {
     "@lancedb/lancedb-darwin-arm64": "^0.24.1"
   },
   "devDependencies": {
@@ -41,6 +50,7 @@
     "@types/node": "^20.14.8",
     "@types/pdf-parse": "^1.1.5",
     "@types/pngjs": "^6.0.5",
+    "ts-node": "^10.9.2",
     "typescript": "^5.9.3"
   },
   "overrides": {

@@ -4,7 +4,7 @@ import * as path from "path";
 import { scanDirectory, type ScannedFile } from "./fileScanner";
 import { parseDocument, type ParseFailureReason } from "../parsers/documentParser";
 import { VectorStore, type DocumentChunk } from "../vectorstore/vectorStore";
-import { chunkText } from "../utils/textChunker";
+import { chunkTextsBatch, type ChunkResult } from "../utils/textChunker";
 import { calculateFileHash } from "../utils/fileHash";
 import { type EmbeddingDynamicHandle, type LMStudioClient } from "@lmstudio/sdk";
 import { FailedFileRegistry } from "../utils/failedFileRegistry";
@@ -29,11 +29,6 @@ export interface IndexingResult {
   newFiles: number;
 }
 
-type FileIndexOutcome =
-  | { type: "skipped" }
-  | { type: "indexed"; changeType: "new" | "updated" }
-  | { type: "failed" };
-
 export interface IndexingOptions {
   documentsDir: string;
   vectorStore: VectorStore;
@@ -51,7 +46,7 @@ export interface IndexingOptions {
   onProgress?: (progress: IndexingProgress) => void;
 }
 
-type FailureReason = ParseFailureReason | "index.chunk-empty" | "index.vector-add-error";
+type FailureReason = ParseFailureReason | "index.chunk-empty" | "index.vector-add-error" | "index.embedding-error";
 
 function coerceEmbeddingVector(raw: unknown): number[] {
   if (Array.isArray(raw)) {
@@ -91,14 +86,12 @@ function assertFiniteNumber(value: unknown): number {
 }
 
 export class IndexManager {
-  private queue: PQueue;
   private options: IndexingOptions;
   private failureReasonCounts: Record<string, number> = {};
   private failedFileRegistry: FailedFileRegistry;
 
   constructor(options: IndexingOptions) {
     this.options = options;
-    this.queue = new PQueue({ concurrency: options.maxConcurrent });
     this.failedFileRegistry = new FailedFileRegistry(
       path.join(options.vectorStoreDir, ".big-rag-failures.json"),
     );
@@ -106,9 +99,13 @@ export class IndexManager {
 
   /**
    * Start the indexing process
+   * Uses two-phase processing for maximum performance:
+   * Phase 1: Parse all documents and collect texts
+   * Phase 2: Batch chunk all texts in single native call (avoids FFI overhead)
+   * Phase 3: Batch embed and index all chunks
    */
   async index(): Promise<IndexingResult> {
-    const { documentsDir, vectorStore, onProgress } = this.options;
+    const { documentsDir, vectorStore, chunkSize, chunkOverlap, onProgress } = this.options;
 
     try {
       const fileInventory = await vectorStore.getFileHashInventory();
@@ -135,107 +132,253 @@ export class IndexManager {
       });
 
       this.options.abortSignal?.throwIfAborted();
-
       console.log(`Found ${files.length} files to process`);
 
-      // Step 2: Index files
-      let processedCount = 0;
-      let successCount = 0;
-      let failCount = 0;
-      let skippedCount = 0;
-      let updatedCount = 0;
-      let newCount = 0;
-
+      // Step 2: Parse all documents and collect texts (Phase 1)
       if (onProgress) {
         onProgress({
           totalFiles: files.length,
           processedFiles: 0,
-          currentFile: files[0]?.name ?? "",
+          currentFile: "Parsing documents...",
           status: "indexing",
         });
       }
 
-      // Abort listener: when signal fires, clear pending tasks from the queue
-      const abortSignal = this.options.abortSignal;
-      const onAbort = () => this.queue.clear();
-      if (abortSignal) {
-        abortSignal.addEventListener("abort", onAbort, { once: true });
+      interface ParsedDocument {
+        file: ScannedFile;
+        fileHash: string;
+        text: string;
+        outcome: "new" | "updated" | "skipped" | "failed";
+        failureReason?: FailureReason;
+        failureDetails?: string;
       }
 
-      // Process files in batches
-      const tasks = files.map((file) =>
-        this.queue.add(async () => {
-          // Check abort before processing each file
-          abortSignal?.throwIfAborted();
+      const parsedDocs: ParsedDocument[] = [];
+      let parseCount = 0;
 
-          let outcome: FileIndexOutcome = { type: "failed" };
+      // Parse documents with concurrency control
+      const parseQueue = new PQueue({ concurrency: this.options.maxConcurrent });
+      const parseTasks = files.map((file) =>
+        parseQueue.add(async () => {
+          this.options.abortSignal?.throwIfAborted();
+
           try {
-            if (onProgress) {
-              onProgress({
-                totalFiles: files.length,
-                processedFiles: processedCount,
-                currentFile: file.name,
-                status: "indexing",
-                successfulFiles: successCount,
-                failedFiles: failCount,
-                skippedFiles: skippedCount,
-              });
+            const fileHash = await calculateFileHash(file.path);
+            const existingHashes = fileInventory.get(file.path);
+            const hasSameHash = existingHashes?.has(fileHash) ?? false;
+
+            // Check if already indexed
+            if (this.options.autoReindex && hasSameHash) {
+              parsedDocs.push({ file, fileHash, text: "", outcome: "skipped" });
+              return;
             }
 
-            outcome = await this.indexFile(file, fileInventory);
-          } catch (error) {
-            console.error(`Error indexing file ${file.path}:`, error);
-            this.recordFailure(
-              "parser.unexpected-error",
-              error instanceof Error ? error.message : String(error),
-              file,
-            );
-          }
-
-          processedCount++;
-          switch (outcome.type) {
-            case "skipped":
-              successCount++;
-              skippedCount++;
-              break;
-            case "indexed":
-              successCount++;
-              if (outcome.changeType === "new") {
-                newCount++;
-              } else {
-                updatedCount++;
+            // Check for previous failure
+            if (this.options.autoReindex) {
+              const previousFailure = await this.failedFileRegistry.getFailureReason(file.path, fileHash);
+              if (previousFailure) {
+                parsedDocs.push({ file, fileHash, text: "", outcome: "skipped" });
+                return;
               }
-              break;
-            case "failed":
-              failCount++;
-              break;
+            }
+
+            // Parse document
+            const parsedResult = await parseDocument(file.path, this.options.enableOCR, this.options.client);
+            if (!parsedResult.success) {
+              parsedDocs.push({
+                file,
+                fileHash,
+                text: "",
+                outcome: "failed",
+                failureReason: parsedResult.reason,
+                failureDetails: parsedResult.details,
+              });
+              return;
+            }
+
+            parsedDocs.push({
+              file,
+              fileHash,
+              text: parsedResult.document.text,
+              outcome: hasSameHash ? "updated" : "new",
+            });
+          } catch (error) {
+            parsedDocs.push({
+              file,
+              fileHash: "",
+              text: "",
+              outcome: "failed",
+              failureReason: "parser.unexpected-error",
+              failureDetails: error instanceof Error ? error.message : String(error),
+            });
           }
 
+          parseCount++;
           if (onProgress) {
             onProgress({
               totalFiles: files.length,
-              processedFiles: processedCount,
-              currentFile: file.name,
+              processedFiles: parseCount,
+              currentFile: `Parsed ${parseCount}/${files.length}...`,
               status: "indexing",
-              successfulFiles: successCount,
-              failedFiles: failCount,
-              skippedFiles: skippedCount,
             });
           }
         })
       );
 
-      await Promise.all(tasks);
+      await Promise.all(parseTasks);
 
-      // Clean up abort listener
-      if (abortSignal) {
-        abortSignal.removeEventListener("abort", onAbort);
+      // Record parse failures
+      for (const doc of parsedDocs) {
+        if (doc.outcome === "failed" && doc.failureReason) {
+          this.recordFailure(doc.failureReason, doc.failureDetails, doc.file);
+          if (doc.fileHash) {
+            await this.failedFileRegistry.recordFailure(doc.file.path, doc.fileHash, doc.failureReason);
+          }
+        }
+      }
+
+      // Step 3: Batch chunk all texts (Phase 2) - SINGLE NATIVE CALL
+      const textsToChunk = parsedDocs.filter(d => d.outcome !== "skipped" && d.outcome !== "failed").map(d => d.text);
+      const validDocs = parsedDocs.filter(d => d.outcome !== "skipped" && d.outcome !== "failed");
+
+      let chunkedTexts: Map<number, ChunkResult[]> = new Map();
+
+      if (textsToChunk.length > 0) {
+        console.log(`Batch chunking ${textsToChunk.length} documents...`);
+        chunkedTexts = await chunkTextsBatch(textsToChunk, chunkSize, chunkOverlap);
+      }
+
+      // Step 4: Embed and index ALL chunks in a single batch (Phase 3)
+      // This is the KEY optimization - one embedding API call for ALL chunks
+      let successCount = 0;
+      let failCount = 0;
+      let skippedCount = parsedDocs.filter(d => d.outcome === "skipped").length;
+      let updatedCount = 0;
+      let newCount = 0;
+
+      // Collect ALL chunks from ALL files with their metadata
+      interface ChunkWithMetadata {
+        docIndex: number;
+        chunkIndex: number;
+        text: string;
+        doc: typeof validDocs[0];
+        chunk: ChunkResult;
+      }
+
+      const allChunks: ChunkWithMetadata[] = [];
+      for (let i = 0; i < validDocs.length; i++) {
+        const doc = validDocs[i];
+        const chunks = chunkedTexts.get(i) || [];
+
+        if (chunks.length === 0) {
+          console.log(`No chunks created from ${doc.file.name}`);
+          this.recordFailure("index.chunk-empty", "chunkTextsBatch produced 0 chunks", doc.file);
+          if (doc.fileHash) {
+            await this.failedFileRegistry.recordFailure(doc.file.path, doc.fileHash, "index.chunk-empty");
+          }
+          failCount++;
+          continue;
+        }
+
+        for (let j = 0; j < chunks.length; j++) {
+          allChunks.push({
+            docIndex: i,
+            chunkIndex: j,
+            text: chunks[j].text,
+            doc,
+            chunk: chunks[j],
+          });
+        }
+      }
+
+      console.log(`Embedding ${allChunks.length} chunks from ${validDocs.length} files...`);
+
+      // Embed in batches of 200 for optimal network performance (2.71x speedup)
+      // See FINAL_PERFORMANCE_REPORT.md for benchmark details
+      const EMBEDDING_BATCH_SIZE = 200;
+      
+      if (allChunks.length > 0) {
+        try {
+          const allTexts = allChunks.map(c => c.text);
+          const allEmbeddings: any[] = [];
+          
+          // Embed in batches to avoid timeout and improve reliability
+          for (let i = 0; i < allTexts.length; i += EMBEDDING_BATCH_SIZE) {
+            const batch = allTexts.slice(i, i + EMBEDDING_BATCH_SIZE);
+            const result = await this.options.embeddingModel.embed(batch);
+            allEmbeddings.push(...result);
+          }
+
+          // Group results by file for vector store insertion
+          const chunksByFile = new Map<number, DocumentChunk[]>();
+          for (let i = 0; i < allEmbeddings.length; i++) {
+            const chunkInfo = allChunks[i];
+            const embedding = coerceEmbeddingVector(allEmbeddings[i].embedding);
+
+            let fileChunks = chunksByFile.get(chunkInfo.docIndex);
+            if (!fileChunks) {
+              fileChunks = [];
+              chunksByFile.set(chunkInfo.docIndex, fileChunks);
+            }
+
+            fileChunks.push({
+              id: `${chunkInfo.doc.fileHash}-${chunkInfo.chunkIndex}`,
+              text: chunkInfo.text,
+              vector: embedding,
+              filePath: chunkInfo.doc.file.path,
+              fileName: chunkInfo.doc.file.name,
+              fileHash: chunkInfo.doc.fileHash,
+              chunkIndex: chunkInfo.chunkIndex,
+              metadata: {
+                extension: chunkInfo.doc.file.extension,
+                size: chunkInfo.doc.file.size,
+                mtime: chunkInfo.doc.file.mtime.toISOString(),
+                startIndex: chunkInfo.chunk.startIndex,
+                endIndex: chunkInfo.chunk.endIndex,
+              },
+            });
+          }
+
+          // Add all chunks to vector store
+          for (const [docIndex, documentChunks] of chunksByFile.entries()) {
+            const doc = validDocs[docIndex];
+            await vectorStore.addChunks(documentChunks);
+            console.log(`Indexed ${documentChunks.length} chunks from ${doc.file.name}`);
+
+            // Update inventory
+            const existingHashes = fileInventory.get(doc.file.path);
+            if (!existingHashes) {
+              fileInventory.set(doc.file.path, new Set([doc.fileHash]));
+            } else {
+              existingHashes.add(doc.fileHash);
+            }
+            await this.failedFileRegistry.clearFailure(doc.file.path);
+
+            successCount++;
+            if (doc.outcome === "new") newCount++;
+            else updatedCount++;
+          }
+        } catch (error) {
+          console.error(`Error embedding all chunks:`, error);
+          // Mark all as failed
+          failCount = validDocs.length;
+          for (const doc of validDocs) {
+            this.recordFailure(
+              "index.embedding-error",
+              error instanceof Error ? error.message : String(error),
+              doc.file,
+            );
+            if (doc.fileHash) {
+              await this.failedFileRegistry.recordFailure(doc.file.path, doc.fileHash, "index.embedding-error");
+            }
+          }
+        }
       }
 
       if (onProgress) {
         onProgress({
           totalFiles: files.length,
-          processedFiles: processedCount,
+          processedFiles: files.length,
           currentFile: "",
           status: "complete",
           successfulFiles: successCount,
@@ -257,7 +400,7 @@ export class IndexManager {
       console.log(
         `Indexing complete: ${successCount}/${files.length} files successfully indexed (${failCount} failed, skipped=${skippedCount}, updated=${updatedCount}, new=${newCount})`,
       );
-      
+
       return {
         totalFiles: files.length,
         successfulFiles: successCount,
@@ -277,183 +420,6 @@ export class IndexManager {
           error: error instanceof Error ? error.message : String(error),
         });
       }
-      throw error;
-    }
-  }
-
-  /**
-   * Index a single file
-   */
-  private async indexFile(
-    file: ScannedFile,
-    fileInventory: Map<string, Set<string>> = new Map(),
-  ): Promise<FileIndexOutcome> {
-    const { vectorStore, embeddingModel, client, chunkSize, chunkOverlap, enableOCR, autoReindex } =
-      this.options;
-
-    let fileHash: string | undefined;
-    try {
-      // Calculate file hash
-      fileHash = await calculateFileHash(file.path);
-      const existingHashes = fileInventory.get(file.path);
-      const hasSeenBefore = existingHashes !== undefined && existingHashes.size > 0;
-      const hasSameHash = existingHashes?.has(fileHash) ?? false;
-
-      // Check if file already indexed
-      if (autoReindex && hasSameHash) {
-        console.log(`File already indexed (skipped): ${file.name}`);
-        return { type: "skipped" };
-      }
-
-      if (autoReindex) {
-        const previousFailure = await this.failedFileRegistry.getFailureReason(file.path, fileHash);
-        if (previousFailure) {
-          console.log(
-            `File previously failed (skipped): ${file.name} (reason=${previousFailure})`,
-          );
-          return { type: "skipped" };
-        }
-      }
-
-      // Wait before parsing to reduce WebSocket load
-      if (this.options.parseDelayMs > 0) {
-        await new Promise(resolve => setTimeout(resolve, this.options.parseDelayMs));
-      }
-
-      // Parse document
-      const parsedResult = await parseDocument(file.path, enableOCR, client);
-      if (!parsedResult.success) {
-        this.recordFailure(parsedResult.reason, parsedResult.details, file);
-        if (fileHash) {
-          await this.failedFileRegistry.recordFailure(file.path, fileHash, parsedResult.reason);
-        }
-        return { type: "failed" };
-      }
-      const parsed = parsedResult.document;
-
-      // Chunk text
-      const chunks = chunkText(parsed.text, chunkSize, chunkOverlap);
-      if (chunks.length === 0) {
-        console.log(`No chunks created from ${file.name}`);
-        this.recordFailure("index.chunk-empty", "chunkText produced 0 chunks", file);
-        if (fileHash) {
-          await this.failedFileRegistry.recordFailure(file.path, fileHash, "index.chunk-empty");
-        }
-        return { type: "failed" }; // Failed to chunk
-      }
-
-      // Generate embeddings and create document chunks
-      const documentChunks: DocumentChunk[] = [];
-
-      for (let i = 0; i < chunks.length; i++) {
-        const chunk = chunks[i];
-        
-        // Check abort between chunk embeddings
-        this.options.abortSignal?.throwIfAborted();
-
-        try {
-          // Generate embedding
-          const embeddingResult = await embeddingModel.embed(chunk.text);
-          const embedding = coerceEmbeddingVector(embeddingResult.embedding);
-          
-          documentChunks.push({
-            id: `${fileHash}-${i}`,
-            text: chunk.text,
-            vector: embedding,
-            filePath: file.path,
-            fileName: file.name,
-            fileHash,
-            chunkIndex: i,
-            metadata: {
-              extension: file.extension,
-              size: file.size,
-              mtime: file.mtime.toISOString(),
-              startIndex: chunk.startIndex,
-              endIndex: chunk.endIndex,
-            },
-          });
-        } catch (error) {
-          console.error(`Error embedding chunk ${i} of ${file.name}:`, error);
-        }
-      }
-
-      // Add chunks to vector store
-      if (documentChunks.length === 0) {
-        this.recordFailure(
-          "index.chunk-empty",
-          "All chunk embeddings failed, no document chunks",
-          file,
-        );
-        if (fileHash) {
-          await this.failedFileRegistry.recordFailure(file.path, fileHash, "index.chunk-empty");
-        }
-        return { type: "failed" };
-      }
-
-      try {
-        await vectorStore.addChunks(documentChunks);
-        console.log(`Indexed ${documentChunks.length} chunks from ${file.name}`);
-        if (!existingHashes) {
-          fileInventory.set(file.path, new Set([fileHash]));
-        } else {
-          existingHashes.add(fileHash);
-        }
-        await this.failedFileRegistry.clearFailure(file.path);
-        return {
-          type: "indexed",
-          changeType: hasSeenBefore ? "updated" : "new",
-        };
-      } catch (error) {
-        console.error(`Error adding chunks for ${file.name}:`, error);
-        this.recordFailure(
-          "index.vector-add-error",
-          error instanceof Error ? error.message : String(error),
-          file,
-        );
-        if (fileHash) {
-          await this.failedFileRegistry.recordFailure(file.path, fileHash, "index.vector-add-error");
-        }
-        return { type: "failed" };
-      }
-    } catch (error) {
-          console.error(`Error indexing file ${file.path}:`, error);
-          this.recordFailure(
-            "parser.unexpected-error",
-            error instanceof Error ? error.message : String(error),
-            file,
-          );
-      if (fileHash) {
-        await this.failedFileRegistry.recordFailure(file.path, fileHash, "parser.unexpected-error");
-      }
-      return { type: "failed" }; // Failed
-    }
-  }
-
-  /**
-   * Reindex a specific file (delete old chunks and reindex)
-   */
-  async reindexFile(filePath: string): Promise<void> {
-    const { vectorStore } = this.options;
-
-    try {
-      const fileHash = await calculateFileHash(filePath);
-      
-      // Delete old chunks
-      await vectorStore.deleteByFileHash(fileHash);
-      
-      // Reindex
-      const file: ScannedFile = {
-        path: filePath,
-        name: filePath.split("/").pop() || filePath,
-        extension: filePath.split(".").pop() || "",
-        mimeType: false,
-        size: 0,
-        mtime: new Date(),
-      };
-      
-      await this.indexFile(file);
-    } catch (error) {
-      console.error(`Error reindexing file ${filePath}:`, error);
       throw error;
     }
   }

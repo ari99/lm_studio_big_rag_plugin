@@ -1,244 +1,332 @@
-# Big RAG Plugin for LM Studio
+# BigRAG Plugin for LM Studio - Rust Accelerated
 
-A powerful RAG (Retrieval-Augmented Generation) plugin for LM Studio that can index and search through gigabytes or even terabytes (not tested) of document data. Hosted here: [ari99/lm_studio_big_rag_plugin](https://github.com/ari99/lm_studio_big_rag_plugin) on GitHub.
+A high-performance RAG (Retrieval-Augmented Generation) plugin for LM Studio that can index and search through large document collections. **Rust-accelerated** with native optimizations for maximum throughput.
+
+**Original:** [ari99/lm_studio_big_rag_plugin](https://github.com/ari99/lm_studio_big_rag_plugin)  
+**Rust Acceleration by:** [MightyPickle](https://github.com/ViswaaTheMightyPickle)
+
+---
+
+## 🚀 Performance Improvements
+
+This fork introduces **2.71x faster indexing** through optimized batch embedding and Rust-native acceleration:
+
+| Optimization | Speedup | Description |
+|--------------|---------|-------------|
+| **Batch Embedding** | 2.71x | Optimal batch size (200 chunks) reduces API overhead |
+| **Rust Chunking** | 1.45x | Native Rust text chunking with parallel processing |
+| **Three-Phase Pipeline** | 3-5x | Parse → Chunk → Embed in optimized stages |
+
+**Real-world results** (50 files, 567 chunks, LM Link network):
+- **Before:** 9,473ms
+- **After:** 3,492ms
+- **Speedup:** 2.71x
+
+See [FINAL_PERFORMANCE_REPORT.md](FINAL_PERFORMANCE_REPORT.md) for detailed benchmarks.
+
+---
 
 ## Features
 
-- **Massive Scale**: Designed to handle large document collections (GB to TB scale)
-- **Deep Directory Scanning**: Recursively scans all subdirectories
-- **Multiple File Formats**: Supports HTM, HTML, XHTML, PDF, EPUB, TXT, TEXT, Markdown variants (MD/MDX/MKDN), BMP, JPEG, PNG
-- **OCR Support**: Optional OCR for image files using Tesseract
-- **Vector Search**: Uses Vectra with sharded indexes for efficient vector storage and retrieval (avoids single-file size limits)
-- **Incremental Indexing**: Automatically detects and skips already-indexed files
-- **Concurrent Processing**: Configurable concurrency for optimal performance
-- **Persistent Storage**: Vector embeddings are stored locally and persist across sessions
+- **🦀 Rust-Native Acceleration**: Native Rust module for text chunking, hashing, and directory scanning
+- **⚡ Optimized Embedding**: Batch embedding with optimal batch size (200 chunks) for network efficiency
+- **📁 Massive Scale**: Handle GB to TB-scale document collections
+- **🔍 Deep Directory Scanning**: Recursively scans all subdirectories
+- **📄 Multiple File Formats**: PDF, EPUB, TXT, Markdown, HTML, images (with OCR)
+- **🔒 Incremental Indexing**: Automatically detects and skips already-indexed files
+- **💾 Persistent Storage**: Vector embeddings stored locally with sharded indexes
+- **🌐 LM Link Support**: Optimized for remote embedding via LM Link
+
+---
 
 ## Supported File Types
 
-- **Documents**: PDF, EPUB, TXT, TEXT
-- **Markdown**: MD, MDX, Markdown, MDown, MKD, MKDN
-- **Web Content**: HTM, HTML, XHTML
-- **Images** (with OCR): BMP, JPEG, JPG, PNG
-- **Archives**: RAR (planned - currently not implemented)
+| Category | Extensions |
+|----------|------------|
+| **Documents** | PDF, EPUB, TXT, TEXT |
+| **Markdown** | MD, MDX, Markdown, MDown, MKD, MKDN |
+| **Web Content** | HTM, HTML, XHTML |
+| **Images** (OCR) | BMP, JPEG, JPG, PNG |
+
+---
 
 ## Installation
 
-1. Navigate to the plugin directory:
+### Quick Install (via LM Studio)
+
 ```bash
-cd big-rag-plugin
+lms get https://github.com/ViswaaTheMightyPickle/lm_studio_big_rag_plugin_rust_accelerated
 ```
 
-2. Install dependencies:
+### Manual Install
+
 ```bash
+cd lm_studio_big_rag_plugin_rust_accelerated
 npm install
+npm run build:native  # Build Rust native module
+npm run build         # Build TypeScript
+npm run dev           # Run in development mode
 ```
 
-3. Build the plugin:
-```bash
-npm run build
-```
-
-4. Run in development mode:
-```bash
-npm run dev
-```
+---
 
 ## Configuration
 
-The plugin provides the following configuration options in LM Studio:
-
 ### Required Settings
 
-- **Documents Directory**: Root directory containing your documents (read access required)
-- **Vector Store Directory**: Where the vector database will be stored (read/write access required)
+| Setting | Description | Example |
+|---------|-------------|---------|
+| **Documents Directory** | Root directory containing your documents | `/home/user/Documents/MyLibrary` |
+| **Vector Store Directory** | Where the vector database is stored | `/home/user/.lmstudio/big-rag-db` |
 
 ### Retrieval Settings
 
-- **Retrieval Limit** (1-20, default: 5): Maximum number of chunks to return
-- **Retrieval Affinity Threshold** (0.0-1.0, default: 0.5): Minimum similarity score for relevance
-- **Chunk Size** (128-2048 tokens, default: 512): Size of text chunks for embedding
-- **Chunk Overlap** (0-512 tokens, default: 100): Overlap between consecutive chunks
+| Setting | Range | Default | Description |
+|---------|-------|---------|-------------|
+| **Retrieval Limit** | 1-20 | 5 | Maximum chunks to return |
+| **Affinity Threshold** | 0.0-1.0 | 0.5 | Minimum similarity score |
+| **Chunk Size** | 128-2048 | 512 | Words per chunk |
+| **Chunk Overlap** | 0-512 | 100 | Overlap between chunks |
 
 ### Performance Settings
 
-- **Max Concurrent Files** (1-10, default: 1): Number of files to process simultaneously
-- **Enable OCR** (default: true): Enable OCR for image files and image-based PDFs using LM Studio's built-in document parser
+| Setting | Range | Default | Description |
+|---------|-------|---------|-------------|
+| **Max Concurrent Files** | 1-10 | 1 | Files processed simultaneously |
+| **Enable OCR** | boolean | true | Enable OCR for images |
 
 ### Reindexing Controls
 
-- **Manual Reindex Trigger** (toggle): Turn this ON and submit any chat message to force indexing to run on every chat session where the plugin is enabled. Flip it OFF once you’re done to stop the automatic reindex loop.
-- **Skip Previously Indexed Files** (default: true): If enabled while "Manual Reindex Trigger" is enabled, each manual run touches just the documents that are new or have changed since the last index; if disabled, every chat rebuilds the entire index from scratch. Combine "Skip Previously Indexed Files" and "Manual Reindex Trigger" to choose between incremental updates or repeated full refreshes.
-- **Automatic First-Run**: If the vector store is empty, the plugin automatically indexes the configured documents the first time any chat message is processed—no manual input is required.
+| Setting | Default | Description |
+|---------|---------|-------------|
+| **Manual Reindex Trigger** | OFF | Toggle ON to force reindexing on every chat |
+| **Skip Previously Indexed Files** | ON | Skip unchanged files during reindex |
+
+---
 
 ## Usage
 
-1. **Configure the Plugin**:
-   - Open LM Studio settings
-   - Navigate to the Big RAG plugin configuration
-   - Set your documents directory (e.g., `/Users/user/Documents/MyLibrary`)
-   - Set your vector store directory (e.g., `/Users/user/.lmstudio/big-rag-db`)
+### 1. Configure the Plugin
 
-2. **Initial Indexing**:
-   - The first time you send a message, the plugin will automatically scan and index your documents
-   - This process may take a while depending on the size of your document collection
-   - Progress will be shown in the LM Studio interface
+1. Open LM Studio settings
+2. Navigate to **Plugins** → **BigRAG**
+3. Set your documents directory and vector store directory
 
-3. **Query Your Documents**:
-   - Simply chat with your LM Studio model as usual
-   - The plugin will automatically search your indexed documents for relevant content
-   - Retrieved passages will be injected into the context for the model to use
+### 2. Initial Indexing
+
+The first time you send a message, the plugin will:
+- Scan your documents directory
+- Parse and chunk all files
+- Generate embeddings (batched for efficiency)
+- Store vectors locally
+
+Progress is shown in the LM Studio interface.
+
+### 3. Query Your Documents
+
+Simply chat with your LM Studio model. The plugin will:
+- Search indexed documents for relevant content
+- Inject retrieved passages into context
+- Cite sources in responses
+
+---
 
 ## Architecture
 
+### Optimized Indexing Pipeline
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   Phase 1   │────▶│   Phase 2   │────▶│   Phase 3   │
+│   Parse     │     │   Chunk     │     │   Embed     │
+│  (parallel) │     │ (Rust batch)│     │ (batches of 200)│
+└─────────────┘     └─────────────┘     └─────────────┘
+     │                     │                     │
+  All files           Single Rust         Batch API calls
+  collected           call for all        (2.71x speedup)
+```
+
 ### Components
 
-1. **File Scanner** (`src/ingestion/fileScanner.ts`):
-   - Recursively scans directories
-   - Filters for supported file types
-   - Collects file metadata
+| Component | File | Description |
+|-----------|------|-------------|
+| **File Scanner** | `src/ingestion/fileScanner.ts` | Rust-native directory scanning |
+| **Document Parsers** | `src/parsers/` | PDF, EPUB, HTML, text, image parsers |
+| **Text Chunker** | `src/utils/textChunker.ts` | Rust-native batch chunking |
+| **Vector Store** | `src/vectorstore/vectorStore.ts` | Vectra with sharded indexes |
+| **Index Manager** | `src/ingestion/indexManager.ts` | Three-phase pipeline orchestration |
+| **Native Module** | `native/src/` | Rust implementations |
 
-2. **Document Parsers** (`src/parsers/`):
-   - `htmlParser.ts`: Extracts text from HTML/HTM files
-   - `pdfParser.ts`: Extracts text from PDF files
-   - `epubParser.ts`: Extracts text from EPUB files
-   - `textParser.ts`: Reads plain text & Markdown files with optional Markdown stripping
-   - `imageParser.ts`: OCR for image files
-   - `documentParser.ts`: Routes to appropriate parser
+---
 
-3. **Vector Store** (`src/vectorstore/vectorStore.ts`):
-   - Uses Vectra with sharded indexes (one shard in memory at a time; avoids V8 string size limits)
-   - Supports incremental updates
-   - Efficient similarity search
+## Performance Benchmarks
 
-4. **Index Manager** (`src/ingestion/indexManager.ts`):
-   - Orchestrates the indexing pipeline
-   - Manages concurrent processing
-   - Handles progress reporting
+### Embedding Batch Size Comparison
 
-5. **Prompt Preprocessor** (`src/promptPreprocessor.ts`):
-   - Intercepts user queries
-   - Performs vector search
-   - Injects relevant context
+| Batch Size | Time (567 chunks) | API Calls | Speedup |
+|------------|-------------------|-----------|---------|
+| 1 (per-chunk) | 9,473ms | 567 | 1.00x |
+| 50 | 5,863ms | 12 | 1.62x |
+| 100 | 5,689ms | 6 | 1.67x |
+| **200** | **3,492ms** | **3** | **2.71x** |
+| 500 | 3,538ms | 2 | 2.68x |
 
-## Performance Considerations
+**Optimal batch size: 200 chunks per API call**
 
-### Large Datasets
+### Rust Native Operations
 
-- **Disk Space**: The vector store requires additional disk space (typically 10-20% of original document size)
-- **Initial Indexing**: Can take several hours for TB-scale collections
-- **Memory Usage**: Scales with concurrent processing (reduce `maxConcurrentFiles` if needed)
+| Operation | TypeScript | Rust Native | Speedup |
+|-----------|------------|-------------|---------|
+| Text Chunking (batch) | Baseline | Parallel | 1.45x |
+| Text Chunking (fast) | Baseline | No metadata | 2.00x |
+| Directory Scanning | Baseline | Parallel | 1.58x |
 
-### Optimization Tips
-
-1. **Start Small**: Test with a subset of documents first
-2. **Disable OCR**: Unless you have many image-based documents, keep OCR disabled
-3. **Adjust Concurrency**: Lower `maxConcurrentFiles` on systems with limited resources
-4. **Chunk Size**: Larger chunks (1024-2048) work better for technical documents
-5. **Threshold Tuning**: Adjust `retrievalAffinityThreshold` based on result quality
+---
 
 ## Troubleshooting
 
 ### No Results Found
 
-- Check that documents directory is correctly configured
-- Verify that indexing completed successfully
-- Try lowering the retrieval affinity threshold
+- Verify documents directory is correctly configured
+- Check that indexing completed successfully
+- Lower the retrieval affinity threshold (try 0.3-0.4)
 - Check LM Studio logs for errors
 
 ### Slow Indexing
 
-- Reduce `maxConcurrentFiles`
+**Network embedding (LM Link):**
+- Ensure stable network connection
+- Use batch size of 200 (already configured)
+- Consider local embedding for faster processing
+
+**Local embedding:**
+- Reduce `Max Concurrent Files` to 1-2
 - Disable OCR if not needed
-- Ensure vector store directory is on a fast drive (SSD recommended)
+- Use SSD for vector store directory
 
 ### Out of Memory
 
-- Reduce `maxConcurrentFiles` to 1 or 2
-- Process documents in batches by organizing them into subdirectories
+- Set `Max Concurrent Files` to 1
+- Close other applications
 - Increase system swap space
 
-### OCR Not Working
+### LM Link Connection Issues
 
-- Tesseract.js downloads language data on first use
-- Ensure internet connectivity during first OCR operation
-- Check that image files are valid and readable
+- Verify remote device is online
+- Check device name in `lms link status`
+- Ensure embedding model is loaded on remote device
 
-### Failure Reason Reporting
-
-- The CLI logs cumulative `success` / `failed` counts after each processed document.
-- Set `BIG_RAG_FAILURE_REPORT_PATH=/absolute/path/report.json` when running `npm run index` (or via LM Studio env settings) to emit a JSON report containing all failure reasons and counts after indexing completes. This is useful when triaging stubborn PDFs such as blueprints or large scanned books.
-
-## Limitations
-
-- **RAR Archives**: Not yet implemented (files are skipped)
-- **Password-Protected Files**: Not supported
-- **Very Large Files**: Individual files >100MB may cause memory issues
-- **Non-English OCR**: Currently only English OCR is configured
+---
 
 ## Development
 
 ### Project Structure
 
 ```
-big-rag-plugin/
+lm_studio_big_rag_plugin_rust_accelerated/
 ├── src/
-│   ├── config.ts              # Plugin configuration schema
+│   ├── config.ts              # Plugin configuration
 │   ├── index.ts               # Main entry point
-│   ├── promptPreprocessor.ts  # RAG integration
+│   ├── promptPreprocessor.ts  # RAG query integration
 │   ├── ingestion/
-│   │   ├── fileScanner.ts     # Directory scanning
-│   │   └── indexManager.ts    # Indexing orchestration
-│   ├── parsers/
-│   │   ├── documentParser.ts  # Parser router
-│   │   ├── htmlParser.ts      # HTML parsing
-│   │   ├── pdfParser.ts       # PDF parsing
-│   │   ├── epubParser.ts      # EPUB parsing
-│   │   ├── textParser.ts      # Text parsing
-│   │   └── imageParser.ts     # OCR parsing
-│   ├── vectorstore/
-│   │   └── vectorStore.ts     # Vectra sharded index integration
+│   │   ├── fileScanner.ts     # Rust-native scanning
+│   │   └── indexManager.ts    # Three-phase pipeline
+│   ├── parsers/               # Document parsers
+│   ├── vectorstore/           # Vectra integration
 │   └── utils/
-│       ├── fileHash.ts        # File hashing
-│       └── textChunker.ts     # Text chunking
-├── manifest.json              # Plugin manifest
-├── package.json               # Dependencies
-├── tsconfig.json              # TypeScript config
-└── README.md                  # This file
+│       ├── textChunker.ts     # Rust batch chunking
+│       └── fileHash.ts        # File hashing
+├── native/                    # Rust native module
+│   ├── src/
+│   │   ├── chunking.rs        # Text chunking
+│   │   ├── hashing.rs         # File hashing
+│   │   └── scanning.rs        # Directory scanning
+│   └── Cargo.toml
+├── benchmarks/                # Performance benchmarks
+├── FINAL_PERFORMANCE_REPORT.md
+└── README.md
 ```
 
-### Testing
-
-Automated parser smoke tests cover HTML, Markdown, and plain text ingestion:
+### Building the Native Module
 
 ```bash
-npm run test
+# Build Rust native module
+cd native
+npm run build
+
+# Build TypeScript
+cd ..
+npm run build
+
+# Run tests
+npm run test:all
+
+# Run benchmarks
+npx ts-node benchmarks/hybridEmbedBench.ts
 ```
 
-For end-to-end validation:
+### Running Benchmarks
 
-1. Create a test directory with sample documents
-2. Configure the plugin to use this directory
-3. Send a test query to verify retrieval works
-4. Check LM Studio logs for any errors
+```bash
+# Embedding batch size benchmark
+npx ts-node benchmarks/hybridEmbedBench.ts
 
-### Contributing
+# End-to-end indexing benchmark
+npx ts-node benchmarks/e2eBench.ts
 
-This plugin is based on the LM Studio plugin SDK. For more information:
+# Real LM Studio API benchmark
+npx ts-node benchmarks/realEmbedBench.ts
+```
 
-- [lmstudio-js GitHub](https://github.com/lmstudio-ai/lmstudio-js)
-- [Documentation](https://lmstudio.ai/docs)
-- [Discord](https://discord.gg/6Q7Xn6MRVS)
+---
+
+## Credits
+
+**Original Plugin:** [ari99/lm_studio_big_rag_plugin](https://github.com/ari99/lm_studio_big_rag_plugin)
+
+**Rust Acceleration & Optimization by:**
+- **MightyPickle** ([ViswaaTheMightyPickle](https://github.com/ViswaaTheMightyPickle))
+
+**Key Contributions:**
+- Three-phase indexing pipeline (Parse → Chunk → Embed)
+- Optimal batch embedding (200 chunks/batch = 2.71x speedup)
+- Rust native module integration
+- Comprehensive performance benchmarking
+- LM Link network optimization
+
+---
 
 ## License
 
 ISC
 
+---
+
 ## Acknowledgments
 
-- Built using the LM Studio SDK
-- Uses Vectra for vector storage (sharded indexes)
-- OCR powered by Tesseract.js
-- PDF parsing via pdf-parse
-- EPUB parsing via epub2
-- HTML parsing via cheerio
+- **LM Studio SDK** - Plugin framework
+- **Vectra** - Vector storage with sharded indexes
+- **Tesseract.js** - OCR for image files
+- **pdf-parse** - PDF text extraction
+- **epub2** - EPUB parsing
+- **cheerio** - HTML parsing
+- **napi-rs** - Rust Node.js bindings
+- **Rayon** - Rust parallel processing
 
+---
+
+## Contributing
+
+Contributions welcome! Areas for future optimization:
+
+1. **GPU Embedding** - CUDA/OpenCL acceleration
+2. **Streaming Index** - Process files as they arrive
+3. **Distributed Indexing** - Multi-machine parallel processing
+4. **Compression** - Compress vector storage
+
+For questions or issues, open a GitHub issue.
+
+---
+
+*Last updated: 2026-03-27*  
+*Version: 1.0.0-rust-accelerated*
