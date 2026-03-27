@@ -293,9 +293,11 @@ export class IndexManager {
 
       console.log(`Embedding ${allChunks.length} chunks from ${validDocs.length} files...`);
 
-      // Embed in batches of 200 for optimal network performance (2.71x speedup)
+      // Embed in batches of 50 for network stability (prevents WebSocket timeouts)
+      // Reduced from 200 for better reliability over LM Link
       // See FINAL_PERFORMANCE_REPORT.md for benchmark details
-      const EMBEDDING_BATCH_SIZE = 200;
+      const EMBEDDING_BATCH_SIZE = 50;
+      const MAX_RETRIES = 3;
       
       if (allChunks.length > 0) {
         try {
@@ -305,8 +307,26 @@ export class IndexManager {
           // Embed in batches to avoid timeout and improve reliability
           for (let i = 0; i < allTexts.length; i += EMBEDDING_BATCH_SIZE) {
             const batch = allTexts.slice(i, i + EMBEDDING_BATCH_SIZE);
-            const result = await this.options.embeddingModel.embed(batch);
-            allEmbeddings.push(...result);
+            let lastError: Error | null = null;
+            
+            // Retry logic for network stability
+            for (let retry = 0; retry < MAX_RETRIES; retry++) {
+              try {
+                const result = await this.options.embeddingModel.embed(batch);
+                allEmbeddings.push(...result);
+                break;
+              } catch (error) {
+                lastError = error instanceof Error ? error : new Error(String(error));
+                if (retry < MAX_RETRIES - 1) {
+                  console.log(`  Embedding batch ${Math.floor(i / EMBEDDING_BATCH_SIZE) + 1}/${Math.ceil(allTexts.length / EMBEDDING_BATCH_SIZE)} failed, retry ${retry + 1}/${MAX_RETRIES}...`);
+                  await new Promise(r => setTimeout(r, 1000 * (retry + 1))); // Exponential backoff
+                }
+              }
+            }
+            
+            if (lastError && allEmbeddings.length - i < EMBEDDING_BATCH_SIZE) {
+              throw lastError;
+            }
           }
 
           // Group results by file for vector store insertion

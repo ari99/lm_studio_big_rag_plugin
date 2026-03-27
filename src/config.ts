@@ -88,10 +88,10 @@ export const configSchematics = createConfigSchematics()
       min: 1,
       max: 10,
       displayName: "Max Concurrent Files",
-      subtitle: "Maximum number of files to process concurrently during indexing. Recommend 1 for large PDF datasets.",
+      subtitle: "Maximum number of files to process concurrently during indexing. Higher values = faster parsing.",
       slider: { min: 1, max: 10, step: 1 },
     },
-    1,
+    5,
   )
   .field(
     "parseDelayMs",
@@ -101,10 +101,10 @@ export const configSchematics = createConfigSchematics()
       min: 0,
       max: 5000,
       displayName: "Parser Delay (ms)",
-      subtitle: "Wait time before parsing each document (helps avoid WebSocket throttling).",
+      subtitle: "Wait time before parsing each document (helps avoid WebSocket throttling). Set to 0 for fastest parsing.",
       slider: { min: 0, max: 5000, step: 100 },
     },
-    500,
+    0,
   )
   .field(
     "enableOCR",

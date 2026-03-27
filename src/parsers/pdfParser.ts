@@ -70,22 +70,31 @@ async function getPdfjsLib() {
   return cachedPdfjsLib;
 }
 
-async function tryLmStudioParser(filePath: string, client: LMStudioClient): Promise<StageResult> {
-  const maxRetries = 2;
+async function tryLmStudioParser(filePath: string, client: LMStudioClient, timeoutMs: number = 10000): Promise<StageResult> {
+  const maxRetries = 1;
   const fileName = filePath.split("/").pop() || filePath;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const fileHandle = await client.files.prepareFile(filePath);
-      const result = await client.files.parseDocument(fileHandle, {
-        onProgress: (progress) => {
-          if (progress === 0 || progress === 1) {
-            console.log(
-              `[PDF Parser] (LM Studio) Processing ${fileName}: ${(progress * 100).toFixed(0)}%`,
-            );
-          }
-        },
-      });
+      // Timeout wrapper for LM Studio parser (prevents hanging on slow WebSocket)
+      const parsePromise = client.files.prepareFile(filePath).then(fileHandle => 
+        client.files.parseDocument(fileHandle, {
+          onProgress: (progress) => {
+            if (progress === 0 || progress === 1) {
+              console.log(
+                `[PDF Parser] (LM Studio) Processing ${fileName}: ${(progress * 100).toFixed(0)}%`,
+              );
+            }
+          },
+        })
+      );
+      
+      const result = await Promise.race([
+        parsePromise,
+        new Promise<never>((_, reject) => 
+          setTimeout(() => reject(new Error("LM Studio parser timeout")), timeoutMs)
+        )
+      ]);
 
       const cleaned = cleanText(result.content);
       if (cleaned.length >= MIN_TEXT_LENGTH) {
@@ -105,9 +114,19 @@ async function tryLmStudioParser(filePath: string, client: LMStudioClient): Prom
         details: `length=${cleaned.length}`,
       };
     } catch (error) {
+      const isTimeout = error instanceof Error && error.message.includes("timeout");
       const isWebSocketError =
         error instanceof Error &&
         (error.message.includes("WebSocket") || error.message.includes("connection closed"));
+
+      if (isTimeout) {
+        console.warn(`[PDF Parser] (LM Studio) Timeout on ${fileName}, falling back to pdf-parse`);
+        return {
+          success: false,
+          reason: "pdf.lmstudio-error",
+          details: "Timeout - falling back to pdf-parse",
+        };
+      }
 
       if (isWebSocketError && attempt < maxRetries) {
         console.warn(
@@ -117,7 +136,7 @@ async function tryLmStudioParser(filePath: string, client: LMStudioClient): Prom
         continue;
       }
 
-      console.error(`[PDF Parser] (LM Studio) Error parsing PDF file ${filePath}:`, error);
+      // Fast fallback - don't log error, just fall back
       return {
         success: false,
         reason: "pdf.lmstudio-error",
@@ -502,21 +521,21 @@ export async function parsePDF(
 ): Promise<PdfParserResult> {
   const fileName = filePath.split("/").pop() || filePath;
 
-  // 1) LM Studio parser
-  const lmStudioResult = await tryLmStudioParser(filePath, client);
-  if (lmStudioResult.success) {
-    return lmStudioResult;
-  }
-  let lastFailure: PdfParserFailure = lmStudioResult;
-
-  // 2) Local pdf-parse fallback
+  // 1) FAST: Local pdf-parse first (no WebSocket overhead)
   const pdfParseResult = await tryPdfParse(filePath);
   if (pdfParseResult.success) {
     return pdfParseResult;
   }
-  lastFailure = pdfParseResult;
+  let lastFailure: PdfParserFailure = pdfParseResult;
 
-  // 3) OCR fallback (only if enabled)
+  // 2) LM Studio parser as fallback (slower, WebSocket-based)
+  const lmStudioResult = await tryLmStudioParser(filePath, client, 15000);
+  if (lmStudioResult.success) {
+    return lmStudioResult;
+  }
+  lastFailure = lmStudioResult;
+
+  // 3) OCR fallback (only if enabled, slowest)
   if (!enableOCR) {
     console.log(
       `[PDF Parser] (OCR) Enable OCR is off, skipping OCR fallback for ${fileName} after other methods returned no text`,
@@ -529,7 +548,7 @@ export async function parsePDF(
   }
 
   console.log(
-    `[PDF Parser] (OCR) No text extracted from ${fileName} with LM Studio or pdf-parse, attempting OCR...`,
+    `[PDF Parser] (OCR) No text extracted from ${fileName} with pdf-parse or LM Studio, attempting OCR...`,
   );
 
   const ocrResult = await tryOcrWithPdfJs(filePath);
