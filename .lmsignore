@@ -1,0 +1,28 @@
+# Rust build artifacts
+native/target/
+native/*.node
+native/*.so
+native/*.dylib
+native/*.dll
+
+# Node modules
+node_modules/
+
+# Build output
+dist/
+
+# Benchmark results
+benchmarks/*.json
+
+# Git
+.git/
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Backup files
+*.bak
