@@ -2,8 +2,8 @@
   "type": "plugin",
   "runner": "node",
   "owner": "mindstudio",
-  "name": "big-rag",
-  "revision": 1,
-  "description": "Hosted at https://github.com/ari99/lm_studio_big_rag_plugin"
+  "name": "big-rag-rust-accelerated",
+  "revision": 2,
+  "description": "Rust-accelerated BigRAG plugin with 2.71x faster indexing. By MightyPickle."
 }
 
