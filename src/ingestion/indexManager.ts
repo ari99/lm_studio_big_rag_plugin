@@ -359,13 +359,20 @@ export class IndexManager {
             });
           }
 
-          // Add all chunks to vector store
-          for (const [docIndex, documentChunks] of chunksByFile.entries()) {
-            const doc = validDocs[docIndex];
-            await vectorStore.addChunks(documentChunks);
-            console.log(`Indexed ${documentChunks.length} chunks from ${doc.file.name}`);
+          // OPTIMIZATION: Batch ALL chunks into single addChunks call (2x speedup)
+          // See VECTOR_STORE_ANALYSIS.md for details
+          const allDocumentChunks: DocumentChunk[] = [];
+          for (const [, documentChunks] of chunksByFile.entries()) {
+            allDocumentChunks.push(...documentChunks);
+          }
 
-            // Update inventory
+          console.log(`Adding ${allDocumentChunks.length} chunks to vector store...`);
+          await vectorStore.addChunks(allDocumentChunks);
+          console.log(`Vector store indexing complete`);
+
+          // Update inventory for all files
+          for (let i = 0; i < validDocs.length; i++) {
+            const doc = validDocs[i];
             const existingHashes = fileInventory.get(doc.file.path);
             if (!existingHashes) {
               fileInventory.set(doc.file.path, new Set([doc.fileHash]));
@@ -373,7 +380,6 @@ export class IndexManager {
               existingHashes.add(doc.fileHash);
             }
             await this.failedFileRegistry.clearFailure(doc.file.path);
-
             successCount++;
             if (doc.outcome === "new") newCount++;
             else updatedCount++;
