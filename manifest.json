@@ -1,7 +1,7 @@
 {
   "type": "plugin",
   "runner": "node",
-  "owner": "mindstudio",
+  "owner": "picklerick",
   "name": "big-rag-rust-accelerated",
   "revision": 2,
   "description": "Rust-accelerated BigRAG plugin with 2.71x faster indexing. By MightyPickle."
