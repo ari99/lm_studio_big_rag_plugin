@@ -13,10 +13,14 @@ export interface IndexingProgress {
   totalFiles: number;
   processedFiles: number;
   currentFile: string;
-  status: "scanning" | "indexing" | "complete" | "error";
+  status: "scanning" | "parsing" | "chunking" | "embedding" | "indexing" | "complete" | "error";
+  phase?: string;
+  phaseProgress?: string;
   successfulFiles?: number;
   failedFiles?: number;
   skippedFiles?: number;
+  totalChunks?: number;
+  embeddedChunks?: number;
   error?: string;
 }
 
@@ -99,7 +103,7 @@ export class IndexManager {
 
   /**
    * Start the indexing process
-   * Uses two-phase processing for maximum performance:
+   * Uses three-phase processing for maximum performance:
    * Phase 1: Parse all documents and collect texts
    * Phase 2: Batch chunk all texts in single native call (avoids FFI overhead)
    * Phase 3: Batch embed and index all chunks
@@ -115,8 +119,10 @@ export class IndexManager {
         onProgress({
           totalFiles: 0,
           processedFiles: 0,
-          currentFile: "",
+          currentFile: "Scanning documents directory...",
           status: "scanning",
+          phase: "Directory Scanning",
+          phaseProgress: "Starting...",
         });
       }
 
@@ -124,15 +130,28 @@ export class IndexManager {
         if (onProgress) {
           onProgress({
             totalFiles: found,
-            processedFiles: 0,
+            processedFiles: scanned,
             currentFile: `Scanned ${scanned} files...`,
             status: "scanning",
+            phase: "Directory Scanning",
+            phaseProgress: `${scanned}/${found} files scanned`,
           });
         }
       });
 
       this.options.abortSignal?.throwIfAborted();
       console.log(`Found ${files.length} files to process`);
+      
+      if (onProgress) {
+        onProgress({
+          totalFiles: files.length,
+          processedFiles: files.length,
+          currentFile: `Found ${files.length} files`,
+          status: "scanning",
+          phase: "Directory Scanning",
+          phaseProgress: "Complete",
+        });
+      }
 
       // Step 2: Parse all documents and collect texts (Phase 1)
       if (onProgress) {
@@ -140,7 +159,9 @@ export class IndexManager {
           totalFiles: files.length,
           processedFiles: 0,
           currentFile: "Parsing documents...",
-          status: "indexing",
+          status: "parsing",
+          phase: "Document Parsing",
+          phaseProgress: `0/${files.length} files parsed`,
         });
       }
 
@@ -218,8 +239,10 @@ export class IndexManager {
             onProgress({
               totalFiles: files.length,
               processedFiles: parseCount,
-              currentFile: `Parsed ${parseCount}/${files.length}...`,
-              status: "indexing",
+              currentFile: `Parsing ${parseCount}/${files.length}...`,
+              status: "parsing",
+              phase: "Document Parsing",
+              phaseProgress: `${parseCount}/${files.length} files parsed`,
             });
           }
         })
@@ -245,7 +268,35 @@ export class IndexManager {
 
       if (textsToChunk.length > 0) {
         console.log(`Batch chunking ${textsToChunk.length} documents...`);
+        
+        if (onProgress) {
+          onProgress({
+            totalFiles: textsToChunk.length,
+            processedFiles: 0,
+            currentFile: "Chunking texts (Rust native)...",
+            status: "chunking",
+            phase: "Text Chunking",
+            phaseProgress: `Chunking ${textsToChunk.length} documents`,
+          });
+        }
+        
         chunkedTexts = await chunkTextsBatch(textsToChunk, chunkSize, chunkOverlap);
+        
+        if (onProgress) {
+          let totalChunks = 0;
+          for (const [, chunks] of chunkedTexts.entries()) {
+            totalChunks += chunks.length;
+          }
+          onProgress({
+            totalFiles: textsToChunk.length,
+            processedFiles: textsToChunk.length,
+            currentFile: `Created ${totalChunks} chunks`,
+            status: "chunking",
+            phase: "Text Chunking",
+            phaseProgress: "Complete",
+            totalChunks,
+          });
+        }
       }
 
       // Step 4: Embed and index ALL chunks in a single batch (Phase 3)
@@ -293,37 +344,78 @@ export class IndexManager {
 
       console.log(`Embedding ${allChunks.length} chunks from ${validDocs.length} files...`);
 
+      if (onProgress) {
+        onProgress({
+          totalFiles: allChunks.length,
+          processedFiles: 0,
+          currentFile: "Generating embeddings...",
+          status: "embedding",
+          phase: "Embedding Generation",
+          phaseProgress: `0/${allChunks.length} chunks embedded`,
+          totalChunks: allChunks.length,
+          embeddedChunks: 0,
+        });
+      }
+
       // Embed in batches of 50 for network stability (prevents WebSocket timeouts)
       // Reduced from 200 for better reliability over LM Link
       // See FINAL_PERFORMANCE_REPORT.md for benchmark details
       const EMBEDDING_BATCH_SIZE = 50;
       const MAX_RETRIES = 3;
-      
+
       if (allChunks.length > 0) {
         try {
           const allTexts = allChunks.map(c => c.text);
           const allEmbeddings: any[] = [];
-          
+
           // Embed in batches to avoid timeout and improve reliability
           for (let i = 0; i < allTexts.length; i += EMBEDDING_BATCH_SIZE) {
             const batch = allTexts.slice(i, i + EMBEDDING_BATCH_SIZE);
+            const batchNumber = Math.floor(i / EMBEDDING_BATCH_SIZE) + 1;
+            const totalBatches = Math.ceil(allTexts.length / EMBEDDING_BATCH_SIZE);
             let lastError: Error | null = null;
-            
+
             // Retry logic for network stability
             for (let retry = 0; retry < MAX_RETRIES; retry++) {
               try {
                 const result = await this.options.embeddingModel.embed(batch);
                 allEmbeddings.push(...result);
+                
+                if (onProgress) {
+                  onProgress({
+                    totalFiles: allChunks.length,
+                    processedFiles: Math.min(i + EMBEDDING_BATCH_SIZE, allChunks.length),
+                    currentFile: `Embedding batch ${batchNumber}/${totalBatches}...`,
+                    status: "embedding",
+                    phase: "Embedding Generation",
+                    phaseProgress: `${allEmbeddings.length}/${allChunks.length} chunks embedded`,
+                    totalChunks: allChunks.length,
+                    embeddedChunks: allEmbeddings.length,
+                  });
+                }
+                
                 break;
               } catch (error) {
                 lastError = error instanceof Error ? error : new Error(String(error));
                 if (retry < MAX_RETRIES - 1) {
-                  console.log(`  Embedding batch ${Math.floor(i / EMBEDDING_BATCH_SIZE) + 1}/${Math.ceil(allTexts.length / EMBEDDING_BATCH_SIZE)} failed, retry ${retry + 1}/${MAX_RETRIES}...`);
+                  console.log(`  Embedding batch ${batchNumber}/${totalBatches} failed, retry ${retry + 1}/${MAX_RETRIES}...`);
+                  if (onProgress) {
+                    onProgress({
+                      totalFiles: allChunks.length,
+                      processedFiles: i,
+                      currentFile: `Embedding batch ${batchNumber}/${totalBatches} failed, retrying...`,
+                      status: "embedding",
+                      phase: "Embedding Generation",
+                      phaseProgress: `Retry ${retry + 1}/${MAX_RETRIES}`,
+                      totalChunks: allChunks.length,
+                      embeddedChunks: allEmbeddings.length,
+                    });
+                  }
                   await new Promise(r => setTimeout(r, 1000 * (retry + 1))); // Exponential backoff
                 }
               }
             }
-            
+
             if (lastError && allEmbeddings.length - i < EMBEDDING_BATCH_SIZE) {
               throw lastError;
             }
@@ -367,7 +459,33 @@ export class IndexManager {
           }
 
           console.log(`Adding ${allDocumentChunks.length} chunks to vector store...`);
+          
+          if (onProgress) {
+            onProgress({
+              totalFiles: allDocumentChunks.length,
+              processedFiles: 0,
+              currentFile: "Adding chunks to vector store...",
+              status: "indexing",
+              phase: "Vector Store Indexing",
+              phaseProgress: `0/${allDocumentChunks.length} chunks indexed`,
+              totalChunks: allDocumentChunks.length,
+            });
+          }
+          
           await vectorStore.addChunks(allDocumentChunks);
+          
+          if (onProgress) {
+            onProgress({
+              totalFiles: allDocumentChunks.length,
+              processedFiles: allDocumentChunks.length,
+              currentFile: "Vector store indexing complete",
+              status: "indexing",
+              phase: "Vector Store Indexing",
+              phaseProgress: "Complete",
+              totalChunks: allDocumentChunks.length,
+            });
+          }
+          
           console.log(`Vector store indexing complete`);
 
           // Update inventory for all files
@@ -405,8 +523,10 @@ export class IndexManager {
         onProgress({
           totalFiles: files.length,
           processedFiles: files.length,
-          currentFile: "",
+          currentFile: `Indexing complete: ${successCount}/${files.length} files`,
           status: "complete",
+          phase: "Indexing Complete",
+          phaseProgress: `${successCount} successful, ${failCount} failed, ${skippedCount} skipped`,
           successfulFiles: successCount,
           failedFiles: failCount,
           skippedFiles: skippedCount,
@@ -441,8 +561,10 @@ export class IndexManager {
         onProgress({
           totalFiles: 0,
           processedFiles: 0,
-          currentFile: "",
+          currentFile: `Error: ${error instanceof Error ? error.message : String(error)}`,
           status: "error",
+          phase: "Error",
+          phaseProgress: "Indexing failed",
           error: error instanceof Error ? error.message : String(error),
         });
       }
