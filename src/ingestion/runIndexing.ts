@@ -53,10 +53,24 @@ export async function runIndexingJob({
     await vectorStore.initialize();
   }
 
-  const embeddingModel = await client.embedding.model(
-    "nomic-ai/nomic-embed-text-v1.5-GGUF",
-    { signal: abortSignal },
-  );
+  // Load embedding model with error handling
+  console.log('[BigRAG] Loading embedding model: nomic-ai/nomic-embed-text-v1.5-GGUF');
+  let embeddingModel;
+  try {
+    embeddingModel = await client.embedding.model(
+      "nomic-ai/nomic-embed-text-v1.5-GGUF",
+      { signal: abortSignal },
+    );
+    console.log('[BigRAG] Embedding model loaded successfully');
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    console.error('[BigRAG] Failed to load embedding model:', errorMsg);
+    console.error('[BigRAG] Make sure:');
+    console.error('[BigRAG]   1. LM Studio is running');
+    console.error('[BigRAG]   2. nomic-ai/nomic-embed-text-v1.5-GGUF is downloaded');
+    console.error('[BigRAG]   3. The model is loaded (not unloaded) in LM Studio');
+    throw new Error(`Failed to load embedding model: ${errorMsg}`);
+  }
 
   const indexManager = new IndexManager({
     documentsDir,

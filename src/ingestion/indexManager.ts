@@ -399,6 +399,9 @@ export class IndexManager {
           const allTexts = safeChunks.map(c => c.text + '\n');
           const allEmbeddings: any[] = [];
 
+          console.log(`[BigRAG] Starting embedding of ${allTexts.length} chunks in batches of ${EMBEDDING_BATCH_SIZE}`);
+          console.log(`[BigRAG] Total batches: ${Math.ceil(allTexts.length / EMBEDDING_BATCH_SIZE)}`);
+
           // Embed in batches to avoid timeout and improve reliability
           for (let i = 0; i < allTexts.length; i += EMBEDDING_BATCH_SIZE) {
             const batch = allTexts.slice(i, i + EMBEDDING_BATCH_SIZE);
