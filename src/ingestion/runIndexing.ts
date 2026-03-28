@@ -59,71 +59,105 @@ export async function runIndexingJob({
   }
 
   // Auto-detect and load embedding model(s)
-  // Load 4 instances by default for parallel embedding processing
+  // Load exactly 4 instances for parallel embedding processing
   console.log('[BigRAG] Searching for available embedding models...');
-  
+
   const EMBEDDING_MODEL_COUNT = 4; // Default: load 4 instances for parallel processing
   const embeddingModels: EmbeddingDynamicHandle[] = [];
-  
+
   try {
-    // First check if any embedding models are already loaded
+    // First check what embedding models are already loaded
     let loadedModels = await client.embedding.listLoaded();
-    
+    console.log(`[BigRAG] Found ${loadedModels.length} already loaded embedding model(s)`);
+
     if (loadedModels.length >= EMBEDDING_MODEL_COUNT) {
-      // Use the first N loaded models
+      // Use exactly EMBEDDING_MODEL_COUNT models
       embeddingModels.push(...loadedModels.slice(0, EMBEDDING_MODEL_COUNT));
       console.log(`[BigRAG] Using ${embeddingModels.length} already loaded embedding models`);
     } else {
-      // Need to load models
-      console.log(`[BigRAG] Loading ${EMBEDDING_MODEL_COUNT} embedding model instances for parallel processing...`);
-      
-      // Try common model IDs
+      // Need to load more models to reach EMBEDDING_MODEL_COUNT
+      console.log(`[BigRAG] Need ${EMBEDDING_MODEL_COUNT} models, have ${loadedModels.length}. Loading additional models...`);
+
+      // Use any already loaded models first
+      if (loadedModels.length > 0) {
+        embeddingModels.push(...loadedModels);
+        console.log(`[BigRAG] Reusing ${loadedModels.length} already loaded model(s)`);
+      }
+
+      // Try common model IDs to find one that works
       const commonModelIds = [
         'nomic-ai/nomic-embed-text-v1.5',
         'nomic-ai/nomic-embed-text-v1.5-GGUF',
         'text-embedding-nomic-embed-text-v1.5',
       ];
-      
+
       let baseModelId: string | null = null;
       for (const modelId of commonModelIds) {
         try {
-          // Try to load the first instance to find a working model ID
+          // Try to load to find a working model ID
           await client.embedding.load(modelId);
           baseModelId = modelId;
           console.log(`[BigRAG] Found working model ID: ${modelId}`);
+          // Get the handle to this first loaded model
+          const firstModel = await client.embedding.model(modelId);
+          if (!embeddingModels.includes(firstModel)) {
+            embeddingModels.push(firstModel);
+          }
           break;
         } catch (e) {
           // Try next model ID
         }
       }
-      
+
       if (!baseModelId) {
         throw new Error('Could not load any embedding model. Please download one first (e.g., nomic-ai/nomic-embed-text-v1.5). Run: lms get nomic-ai/nomic-embed-text-v1.5');
       }
-      
-      // Get handle to the first loaded model
-      const firstModel = await client.embedding.model(baseModelId);
-      embeddingModels.push(firstModel);
-      
-      // Load remaining instances (we already have 1, need EMBEDDING_MODEL_COUNT - 1 more)
-      for (let i = 1; i < EMBEDDING_MODEL_COUNT; i++) {
+
+      // Load additional instances until we have exactly EMBEDDING_MODEL_COUNT
+      let instanceNum = embeddingModels.length + 1;
+      while (embeddingModels.length < EMBEDDING_MODEL_COUNT) {
+        const instanceId = `embedding-instance-${instanceNum}`;
         try {
-          // Load additional instances with unique identifiers
-          const instanceId = `embedding-instance-${i + 1}`;
+          // Check current state before loading
+          const currentModels = await client.embedding.listLoaded();
+          console.log(`[BigRAG] Current loaded models: ${currentModels.length}, Target: ${EMBEDDING_MODEL_COUNT}, Need to load: ${EMBEDDING_MODEL_COUNT - embeddingModels.length}`);
+
+          // Try to load with unique identifier
           const model = await client.embedding.load(baseModelId, { identifier: instanceId });
           embeddingModels.push(model);
-          console.log(`[BigRAG] Loaded embedding model instance ${i + 1}/${EMBEDDING_MODEL_COUNT}: ${instanceId}`);
+          console.log(`[BigRAG] Loaded embedding model instance ${embeddingModels.length}/${EMBEDDING_MODEL_COUNT}: ${instanceId}`);
         } catch (e: any) {
-          // Instance might already exist, get handle to it
           if (e.message?.includes('already exists')) {
-            console.warn(`[BigRAG] Instance ${i + 1} already exists with identifier 'embedding-instance-${i + 1}', skipping...`);
+            // Instance already exists, get handle to it
+            try {
+              const existingModel = await client.embedding.model(instanceId);
+              if (!embeddingModels.some(m => m === existingModel)) {
+                embeddingModels.push(existingModel);
+                console.log(`[BigRAG] Using existing model instance: ${instanceId}`);
+              }
+            } catch (e2) {
+              console.warn(`[BigRAG] Could not get handle to existing instance ${instanceId}: ${e2}`);
+            }
           } else {
-            console.warn(`[BigRAG] Failed to load instance ${i + 1}: ${e.message}`);
+            console.warn(`[BigRAG] Failed to load instance ${instanceNum}: ${e.message}`);
           }
         }
+        instanceNum++;
+
+        // Safety check to prevent infinite loop
+        if (instanceNum > EMBEDDING_MODEL_COUNT + 10) {
+          console.warn('[BigRAG] Stopping model loading to prevent infinite loop');
+          break;
+        }
       }
-      
-      console.log(`[BigRAG] Successfully loaded ${embeddingModels.length} embedding model instances`);
+
+      console.log(`[BigRAG] Successfully loaded ${embeddingModels.length} embedding model instance(s)`);
+    }
+
+    // Final verification: ensure we have exactly EMBEDDING_MODEL_COUNT or fewer
+    if (embeddingModels.length > EMBEDDING_MODEL_COUNT) {
+      console.warn(`[BigRAG] Warning: Have ${embeddingModels.length} models but expected ${EMBEDDING_MODEL_COUNT}. Using first ${EMBEDDING_MODEL_COUNT}.`);
+      embeddingModels.splice(EMBEDDING_MODEL_COUNT);
     }
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
