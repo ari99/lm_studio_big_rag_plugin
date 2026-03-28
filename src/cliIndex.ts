@@ -49,12 +49,13 @@ async function main() {
 
   console.log("[BigRAG CLI] Loading embedding model...");
   const embeddingModel = await client.embedding.model(embeddingModelId);
+  const embeddingModels = [embeddingModel];
 
   const indexManager = new IndexManager({
     documentsDir,
     vectorStore,
     vectorStoreDir,
-    embeddingModel,
+    embeddingModels,
     client,
     chunkSize,
     chunkOverlap,
@@ -63,6 +64,8 @@ async function main() {
     autoReindex,
     parseDelayMs,
     failureReportPath,
+    embeddingBatchSize: 100,
+    embeddingConcurrency: 5,
     onProgress: (progress) => {
       if (progress.status === "scanning") {
         console.log(

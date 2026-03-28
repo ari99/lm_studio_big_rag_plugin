@@ -38,7 +38,7 @@ export interface IndexingOptions {
   documentsDir: string;
   vectorStore: VectorStore;
   vectorStoreDir: string;
-  embeddingModel: EmbeddingDynamicHandle;
+  embeddingModels: EmbeddingDynamicHandle[];  // Support multiple models for parallel embedding
   client: LMStudioClient;
   chunkSize: number;
   chunkOverlap: number;
@@ -49,6 +49,9 @@ export interface IndexingOptions {
   failureReportPath?: string;
   abortSignal?: AbortSignal;
   onProgress?: (progress: IndexingProgress) => void;
+  // Embedding parallelization settings
+  embeddingBatchSize?: number;
+  embeddingConcurrency?: number;
 }
 
 type FailureReason = ParseFailureReason | "index.chunk-empty" | "index.vector-add-error" | "index.embedding-error";
@@ -374,17 +377,18 @@ export class IndexManager {
         });
       }
 
-      // Embed in batches to avoid timeout and improve reliability
-      // Smaller batch size (10) for better reliability with large datasets
-      const EMBEDDING_BATCH_SIZE = 10;
+      // Embed in batches with configurable parallelization
+      // Get settings from options or use defaults
+      const EMBEDDING_BATCH_SIZE = this.options.embeddingBatchSize || 100;
       const MAX_RETRIES = 3;
+      const EMBEDDING_CONCURRENCY = this.options.embeddingConcurrency || 5;
+      const embeddingModels = this.options.embeddingModels || [];
 
       if (allChunks.length > 0) {
         try {
           // No need to validate - tokenizer-based chunking already ensures chunks are within limits
-          // The token count is already stored in each chunk from chunking time
           const safeChunks = allChunks;
-          
+
           // Log token statistics from pre-computed values
           const tokenStats = safeChunks.map(c => c.chunk.tokenEstimate);
           const minTokens = Math.min(...tokenStats, 0);
@@ -395,76 +399,91 @@ export class IndexManager {
           );
 
           // Append newline to each chunk to satisfy embedding model's EOS token expectation
-          // This mitigates the warning: "At least one last token in strings embedded is not SEP"
           const allTexts = safeChunks.map(c => c.text + '\n');
           const allEmbeddings: any[] = [];
 
-          console.log(`[BigRAG] Starting embedding of ${allTexts.length} chunks in batches of ${EMBEDDING_BATCH_SIZE}`);
+          console.log(`[BigRAG] Starting embedding of ${allTexts.length} chunks`);
+          console.log(`[BigRAG] Using ${embeddingModels.length} model(s), batch size: ${EMBEDDING_BATCH_SIZE}, concurrency: ${EMBEDDING_CONCURRENCY}`);
           console.log(`[BigRAG] Total batches: ${Math.ceil(allTexts.length / EMBEDDING_BATCH_SIZE)}`);
 
-          // Embed in batches to avoid timeout and improve reliability
+          let completedBatches = 0;
+          const totalBatches = Math.ceil(allTexts.length / EMBEDDING_BATCH_SIZE);
+          let modelIndex = 0; // Round-robin across models
+
+          // Process batches with controlled concurrency and multi-model distribution
+          const batchQueue: Array<{ batch: string[]; index: number; batchNumber: number }> = [];
           for (let i = 0; i < allTexts.length; i += EMBEDDING_BATCH_SIZE) {
             const batch = allTexts.slice(i, i + EMBEDDING_BATCH_SIZE);
             const batchNumber = Math.floor(i / EMBEDDING_BATCH_SIZE) + 1;
-            const totalBatches = Math.ceil(allTexts.length / EMBEDDING_BATCH_SIZE);
-            let lastError: Error | null = null;
+            batchQueue.push({ batch, index: i, batchNumber });
+          }
 
-            console.log(`[Embedding] Starting batch ${batchNumber}/${totalBatches} (${batch.length} chunks)...`);
+          // Process batches with concurrency limit and round-robin model selection
+          const inFlight = new Map<number, Promise<any>>();
 
-            // Retry logic for network stability
-            for (let retry = 0; retry < MAX_RETRIES; retry++) {
-              try {
-                // Add timeout to embedding call
-                const embedPromise = this.options.embeddingModel.embed(batch);
-                const timeoutPromise = new Promise<never>((_, reject) => 
-                  setTimeout(() => reject(new Error(`Embedding timeout after 60s`)), 60000)
-                );
-                
-                const result = await Promise.race([embedPromise, timeoutPromise]);
-                allEmbeddings.push(...result);
+          for (const { batch, index, batchNumber } of batchQueue) {
+            // Wait if we've hit concurrency limit
+            while (inFlight.size >= EMBEDDING_CONCURRENCY) {
+              await Promise.race(inFlight.values());
+            }
 
-                console.log(`[Embedding] Batch ${batchNumber}/${totalBatches} complete (${allEmbeddings.length}/${safeChunks.length} chunks)`);
+            // Select model round-robin
+            const model = embeddingModels[modelIndex % embeddingModels.length];
+            modelIndex++;
 
-                if (onProgress) {
-                  onProgress({
-                    totalFiles: safeChunks.length,
-                    processedFiles: Math.min(i + EMBEDDING_BATCH_SIZE, safeChunks.length),
-                    currentFile: `Embedding batch ${batchNumber}/${totalBatches}...`,
-                    status: "embedding",
-                    phase: "Embedding Generation",
-                    phaseProgress: `${allEmbeddings.length}/${safeChunks.length} chunks embedded`,
-                    totalChunks: safeChunks.length,
-                    embeddedChunks: allEmbeddings.length,
-                  });
-                }
+            const batchPromise = (async () => {
+              let lastError: Error | null = null;
 
-                break;
-              } catch (error) {
-                lastError = error instanceof Error ? error : new Error(String(error));
-                console.error(`[Embedding] Batch ${batchNumber}/${totalBatches} failed:`, lastError.message);
-                if (retry < MAX_RETRIES - 1) {
-                  console.log(`  Embedding batch ${batchNumber}/${totalBatches} failed, retry ${retry + 1}/${MAX_RETRIES}...`);
-                  if (onProgress) {
-                    onProgress({
-                      totalFiles: safeChunks.length,
-                      processedFiles: i,
-                      currentFile: `Embedding batch ${batchNumber}/${totalBatches} failed, retrying...`,
-                      status: "embedding",
-                      phase: "Embedding Generation",
-                      phaseProgress: `Retry ${retry + 1}/${MAX_RETRIES}`,
-                      totalChunks: safeChunks.length,
-                      embeddedChunks: allEmbeddings.length,
-                    });
+              for (let retry = 0; retry < MAX_RETRIES; retry++) {
+                try {
+                  const embedPromise = model.embed(batch);
+                  const timeoutPromise = new Promise<never>((_, reject) =>
+                    setTimeout(() => reject(new Error(`Embedding timeout after 120s`)), 120000)
+                  );
+
+                  const result = await Promise.race([embedPromise, timeoutPromise]);
+                  return result;
+                } catch (error) {
+                  lastError = error instanceof Error ? error : new Error(String(error));
+                  console.error(`[Embedding] Batch ${batchNumber}/${totalBatches} failed:`, lastError.message);
+                  if (retry < MAX_RETRIES - 1) {
+                    console.log(`  Retry ${retry + 1}/${MAX_RETRIES}...`);
+                    await new Promise(r => setTimeout(r, 1000 * (retry + 1)));
                   }
-                  await new Promise(r => setTimeout(r, 1000 * (retry + 1))); // Exponential backoff
                 }
               }
-            }
 
-            if (lastError && allEmbeddings.length - i < EMBEDDING_BATCH_SIZE) {
-              throw lastError;
-            }
+              throw lastError || new Error('All retries failed');
+            })();
+
+            inFlight.set(batchNumber, batchPromise);
+
+            batchPromise.then((result) => {
+              allEmbeddings.push(...result);
+              completedBatches++;
+              inFlight.delete(batchNumber);
+
+              if (onProgress) {
+                onProgress({
+                  totalFiles: safeChunks.length,
+                  processedFiles: Math.min(index + EMBEDDING_BATCH_SIZE, safeChunks.length),
+                  currentFile: `Embedding batch ${batchNumber}/${totalBatches}...`,
+                  status: "embedding",
+                  phase: "Embedding Generation",
+                  phaseProgress: `${completedBatches}/${totalBatches} batches (${allEmbeddings.length}/${safeChunks.length} chunks)`,
+                  totalChunks: safeChunks.length,
+                  embeddedChunks: allEmbeddings.length,
+                });
+              }
+
+              console.log(`[Embedding] Batch ${batchNumber}/${totalBatches} complete (${completedBatches}/${totalBatches}, ${allEmbeddings.length}/${safeChunks.length} chunks)`);
+            });
           }
+
+          // Wait for all remaining batches to complete
+          await Promise.all(inFlight.values());
+
+          console.log(`[BigRAG] Embedding complete: ${allEmbeddings.length} chunks embedded`);
 
           // Group results by file for vector store insertion
           const chunksByFile = new Map<number, DocumentChunk[]>();

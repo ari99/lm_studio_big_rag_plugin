@@ -152,5 +152,60 @@ export const configSchematics = createConfigSchematics()
     },
     DEFAULT_PROMPT_TEMPLATE,
   )
+  .field(
+    "embeddingParallelization.mode",
+    "string",
+    {
+      displayName: "Embedding Parallelization",
+      subtitle: "Speed up embedding by using multiple models or larger batches. 'multi-model' loads multiple model instances, 'large-batch' uses bigger batches with one model.",
+      placeholder: "single (multi-model for advanced users)",
+    },
+    "single",
+  )
+  .field(
+    "embeddingParallelization.modelCount",
+    "numeric",
+    {
+      int: true,
+      min: 1,
+      max: 8,
+      displayName: "Number of Embedding Models",
+      subtitle: "How many instances of the embedding model to load. More = faster but uses more VRAM. Only used in 'multi-model' mode.",
+      slider: { min: 1, max: 8, step: 1 },
+      dependencies: [
+        {
+          key: "embeddingParallelization.mode",
+          condition: { type: "equals", value: "multi-model" },
+        },
+      ],
+    },
+    2,
+  )
+  .field(
+    "embeddingParallelization.batchSize",
+    "numeric",
+    {
+      int: true,
+      min: 10,
+      max: 500,
+      displayName: "Batch Size",
+      subtitle: "Number of chunks per embedding API call. Larger = more efficient but uses more memory. Used in all modes.",
+      slider: { min: 10, max: 500, step: 10 },
+    },
+    100,
+  )
+  .field(
+    "embeddingParallelization.concurrency",
+    "numeric",
+    {
+      int: true,
+      min: 1,
+      max: 20,
+      displayName: "Concurrent Batches",
+      subtitle: "Number of simultaneous embedding requests. Higher = faster but more network/memory pressure.",
+      slider: { min: 1, max: 20, step: 1 },
+    },
+    5,
+  )
   .build();
 
