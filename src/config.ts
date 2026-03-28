@@ -160,17 +160,17 @@ export const configSchematics = createConfigSchematics()
       min: 1,
       max: 8,
       displayName: "Number of Embedding Models",
-      subtitle: "How many instances of the embedding model to load. The plugin will use 'lms load' CLI to load multiple instances with identifiers like 'model-1', 'model-2', etc. More = faster but uses more VRAM.",
+      subtitle: "How many instances of the embedding model to load. Uses SDK's load_new_instance() to load multiple instances. More = faster but uses more VRAM (~300MB each for nomic-embed).",
       slider: { min: 1, max: 8, step: 1 },
     },
     1,
   )
   .field(
-    "embeddingParallelization.modelIdPattern",
+    "embeddingParallelization.embeddingModelId",
     "string",
     {
-      displayName: "Base Model ID",
-      subtitle: "The base model ID to load. For multi-model, instances will be loaded as '{base}-1', '{base}-2', etc. Example: 'nomic-ai/nomic-embed-text-v1.5-GGUF'",
+      displayName: "Embedding Model ID",
+      subtitle: "The model ID to load. Example: 'nomic-ai/nomic-embed-text-v1.5-GGUF'",
       placeholder: "nomic-ai/nomic-embed-text-v1.5-GGUF",
     },
     "nomic-ai/nomic-embed-text-v1.5-GGUF",

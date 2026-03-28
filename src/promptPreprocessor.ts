@@ -157,7 +157,7 @@ export async function preprocess(
   
   // Embedding parallelization settings
   const embeddingModelCount = pluginConfig.get("embeddingParallelization.modelCount") ?? 1;
-  const embeddingModelIdPattern = pluginConfig.get("embeddingParallelization.modelIdPattern") ?? "nomic-ai/nomic-embed-text-v1.5-GGUF";
+  const embeddingModelId = pluginConfig.get("embeddingParallelization.embeddingModelId") ?? "nomic-ai/nomic-embed-text-v1.5-GGUF";
   const embeddingBatchSize = pluginConfig.get("embeddingParallelization.batchSize") ?? 100;
   const embeddingConcurrency = pluginConfig.get("embeddingParallelization.concurrency") ?? 5;
 
@@ -246,7 +246,7 @@ export async function preprocess(
       reindexRequested,
       skipPreviouslyIndexed: pluginConfig.get("manualReindex.skipPreviouslyIndexed"),
       embeddingModelCount,
-      embeddingModelIdPattern,
+      embeddingModelId,
       embeddingBatchSize,
       embeddingConcurrency,
     });
@@ -281,7 +281,7 @@ export async function preprocess(
             vectorStore,
             forceReindex: true,
             embeddingModelCount,
-            embeddingModelIdPattern,
+            embeddingModelId,
             embeddingBatchSize,
             embeddingConcurrency,
             onProgress: (progress) => {
@@ -505,7 +505,7 @@ interface ConfigReindexOpts {
   reindexRequested: boolean;
   skipPreviouslyIndexed: boolean;
   embeddingModelCount: number;
-  embeddingModelIdPattern: string;
+  embeddingModelId: string;
   embeddingBatchSize: number;
   embeddingConcurrency: number;
 }
@@ -522,7 +522,7 @@ async function maybeHandleConfigTriggeredReindex({
   reindexRequested,
   skipPreviouslyIndexed,
   embeddingModelCount,
-  embeddingModelIdPattern,
+  embeddingModelId,
   embeddingBatchSize,
   embeddingConcurrency,
 }: ConfigReindexOpts) {
@@ -567,7 +567,7 @@ async function maybeHandleConfigTriggeredReindex({
       forceReindex: !skipPreviouslyIndexed,
       vectorStore: vectorStore ?? undefined,
       embeddingModelCount,
-      embeddingModelIdPattern,
+      embeddingModelId,
       embeddingBatchSize,
       embeddingConcurrency,
       onProgress: (progress) => {
