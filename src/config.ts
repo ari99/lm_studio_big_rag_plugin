@@ -153,29 +153,6 @@ export const configSchematics = createConfigSchematics()
     DEFAULT_PROMPT_TEMPLATE,
   )
   .field(
-    "embeddingParallelization.modelCount",
-    "numeric",
-    {
-      int: true,
-      min: 1,
-      max: 8,
-      displayName: "Number of Embedding Models",
-      subtitle: "How many instances of the embedding model to load. Uses SDK's load_new_instance() to load multiple instances. More = faster but uses more VRAM (~300MB each for nomic-embed).",
-      slider: { min: 1, max: 8, step: 1 },
-    },
-    1,
-  )
-  .field(
-    "embeddingParallelization.embeddingModelId",
-    "string",
-    {
-      displayName: "Embedding Model ID",
-      subtitle: "The model ID to load. Example: 'nomic-ai/nomic-embed-text-v1.5-GGUF'",
-      placeholder: "nomic-ai/nomic-embed-text-v1.5-GGUF",
-    },
-    "nomic-ai/nomic-embed-text-v1.5-GGUF",
-  )
-  .field(
     "embeddingParallelization.batchSize",
     "numeric",
     {

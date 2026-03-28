@@ -156,8 +156,6 @@ export async function preprocess(
   const reindexRequested = pluginConfig.get("manualReindex.trigger");
   
   // Embedding parallelization settings
-  const embeddingModelCount = pluginConfig.get("embeddingParallelization.modelCount") ?? 1;
-  const embeddingModelId = pluginConfig.get("embeddingParallelization.embeddingModelId") ?? "nomic-ai/nomic-embed-text-v1.5-GGUF";
   const embeddingBatchSize = pluginConfig.get("embeddingParallelization.batchSize") ?? 100;
   const embeddingConcurrency = pluginConfig.get("embeddingParallelization.concurrency") ?? 5;
 
@@ -245,8 +243,6 @@ export async function preprocess(
       parseDelayMs,
       reindexRequested,
       skipPreviouslyIndexed: pluginConfig.get("manualReindex.skipPreviouslyIndexed"),
-      embeddingModelCount,
-      embeddingModelId,
       embeddingBatchSize,
       embeddingConcurrency,
     });
@@ -280,8 +276,6 @@ export async function preprocess(
             parseDelayMs,
             vectorStore,
             forceReindex: true,
-            embeddingModelCount,
-            embeddingModelId,
             embeddingBatchSize,
             embeddingConcurrency,
             onProgress: (progress) => {
@@ -504,8 +498,6 @@ interface ConfigReindexOpts {
   parseDelayMs: number;
   reindexRequested: boolean;
   skipPreviouslyIndexed: boolean;
-  embeddingModelCount: number;
-  embeddingModelId: string;
   embeddingBatchSize: number;
   embeddingConcurrency: number;
 }
@@ -521,8 +513,6 @@ async function maybeHandleConfigTriggeredReindex({
   parseDelayMs,
   reindexRequested,
   skipPreviouslyIndexed,
-  embeddingModelCount,
-  embeddingModelId,
   embeddingBatchSize,
   embeddingConcurrency,
 }: ConfigReindexOpts) {
@@ -566,8 +556,6 @@ async function maybeHandleConfigTriggeredReindex({
       parseDelayMs,
       forceReindex: !skipPreviouslyIndexed,
       vectorStore: vectorStore ?? undefined,
-      embeddingModelCount,
-      embeddingModelId,
       embeddingBatchSize,
       embeddingConcurrency,
       onProgress: (progress) => {
