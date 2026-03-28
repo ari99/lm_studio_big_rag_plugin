@@ -4,6 +4,8 @@ node_modules/
 # Build artifacts
 dist/
 *.tsbuildinfo
+native/target/
+*.node
 
 # Logs
 *.log
@@ -25,4 +27,5 @@ dist/
 *~
 .vscode/
 .idea/
+.lmstudio/
 

@@ -4,7 +4,7 @@ import * as path from "path";
 import { scanDirectory, type ScannedFile } from "./fileScanner";
 import { parseDocument, type ParseFailureReason } from "../parsers/documentParser";
 import { VectorStore, type DocumentChunk } from "../vectorstore/vectorStore";
-import { chunkTextsBatch, type ChunkResult } from "../utils/textChunker";
+import { chunkTextsBatch, type ChunkResult, ensureChunkTokenLimits } from "../utils/textChunker";
 import { calculateFileHash } from "../utils/fileHash";
 import { type EmbeddingDynamicHandle, type LMStudioClient } from "@lmstudio/sdk";
 import { FailedFileRegistry } from "../utils/failedFileRegistry";
@@ -319,7 +319,7 @@ export class IndexManager {
       const allChunks: ChunkWithMetadata[] = [];
       for (let i = 0; i < validDocs.length; i++) {
         const doc = validDocs[i];
-        const chunks = chunkedTexts.get(i) || [];
+        let chunks = chunkedTexts.get(i) || [];
 
         if (chunks.length === 0) {
           console.log(`No chunks created from ${doc.file.name}`);
@@ -329,6 +329,15 @@ export class IndexManager {
           }
           failCount++;
           continue;
+        }
+
+        // Apply token limit enforcement to ensure no chunk exceeds embedding model limits
+        const originalChunkCount = chunks.length;
+        chunks = ensureChunkTokenLimits(chunks);
+        if (chunks.length !== originalChunkCount) {
+          console.log(
+            `Split oversized chunks in ${doc.file.name}: ${originalChunkCount} → ${chunks.length} chunks`,
+          );
         }
 
         for (let j = 0; j < chunks.length; j++) {
@@ -365,7 +374,27 @@ export class IndexManager {
 
       if (allChunks.length > 0) {
         try {
-          const allTexts = allChunks.map(c => c.text);
+          // SAFETY CHECK: Filter out any chunks that still exceed the embedding token limit
+          // This is a last line of defense before sending to the embedding model
+          const { estimateTokenCount, MAX_EMBEDDING_TOKENS } = await import("../utils/textChunker");
+          const safeChunks = allChunks.filter((chunk, idx) => {
+            const tokens = estimateTokenCount(chunk.text);
+            if (tokens > MAX_EMBEDDING_TOKENS) {
+              console.warn(
+                `Skipping chunk ${idx} from ${chunk.doc.file.name}: ${tokens} tokens exceeds limit of ${MAX_EMBEDDING_TOKENS}`,
+              );
+              return false;
+            }
+            return true;
+          });
+
+          if (safeChunks.length < allChunks.length) {
+            console.warn(
+              `Skipped ${allChunks.length - safeChunks.length} oversized chunks that exceeded token limit`,
+            );
+          }
+
+          const allTexts = safeChunks.map(c => c.text);
           const allEmbeddings: any[] = [];
 
           // Embed in batches to avoid timeout and improve reliability
@@ -383,17 +412,17 @@ export class IndexManager {
                 
                 if (onProgress) {
                   onProgress({
-                    totalFiles: allChunks.length,
-                    processedFiles: Math.min(i + EMBEDDING_BATCH_SIZE, allChunks.length),
+                    totalFiles: safeChunks.length,
+                    processedFiles: Math.min(i + EMBEDDING_BATCH_SIZE, safeChunks.length),
                     currentFile: `Embedding batch ${batchNumber}/${totalBatches}...`,
                     status: "embedding",
                     phase: "Embedding Generation",
-                    phaseProgress: `${allEmbeddings.length}/${allChunks.length} chunks embedded`,
-                    totalChunks: allChunks.length,
+                    phaseProgress: `${allEmbeddings.length}/${safeChunks.length} chunks embedded`,
+                    totalChunks: safeChunks.length,
                     embeddedChunks: allEmbeddings.length,
                   });
                 }
-                
+
                 break;
               } catch (error) {
                 lastError = error instanceof Error ? error : new Error(String(error));
@@ -401,13 +430,13 @@ export class IndexManager {
                   console.log(`  Embedding batch ${batchNumber}/${totalBatches} failed, retry ${retry + 1}/${MAX_RETRIES}...`);
                   if (onProgress) {
                     onProgress({
-                      totalFiles: allChunks.length,
+                      totalFiles: safeChunks.length,
                       processedFiles: i,
                       currentFile: `Embedding batch ${batchNumber}/${totalBatches} failed, retrying...`,
                       status: "embedding",
                       phase: "Embedding Generation",
                       phaseProgress: `Retry ${retry + 1}/${MAX_RETRIES}`,
-                      totalChunks: allChunks.length,
+                      totalChunks: safeChunks.length,
                       embeddedChunks: allEmbeddings.length,
                     });
                   }
@@ -424,7 +453,7 @@ export class IndexManager {
           // Group results by file for vector store insertion
           const chunksByFile = new Map<number, DocumentChunk[]>();
           for (let i = 0; i < allEmbeddings.length; i++) {
-            const chunkInfo = allChunks[i];
+            const chunkInfo = safeChunks[i];
             const embedding = coerceEmbeddingVector(allEmbeddings[i].embedding);
 
             let fileChunks = chunksByFile.get(chunkInfo.docIndex);
