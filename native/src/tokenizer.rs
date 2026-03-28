@@ -3,7 +3,7 @@
 
 use napi_derive::napi;
 use rayon::prelude::*;
-use tiktoken_rs::{get_bpe_from_model, CoreBPE};
+use tiktoken_rs::cl100k_base;
 use napi::Result as NapiResult;
 
 /// Result of token counting
@@ -22,19 +22,14 @@ pub struct TokenChunk {
     pub end_token: u32,
 }
 
-/// Get cl100k_base tokenizer (cached)
-fn get_tokenizer() -> NapiResult<CoreBPE> {
-    get_bpe_from_model("cl100k_base").map_err(|e| napi::Error::from_reason(format!("Tokenizer error: {}", e)))
-}
-
 /// Count tokens in text using cl100k_base tokenizer
 /// 
 /// @param text - The text to count tokens in
 /// @returns The number of tokens
 #[napi]
 pub fn count_tokens(text: String) -> NapiResult<u32> {
-    let tokenizer = get_tokenizer()?;
-    let tokens = tokenizer.encode_with_special_tokens(&text);
+    let bpe = cl100k_base().map_err(|e| napi::Error::from_reason(format!("Tokenizer error: {}", e)))?;
+    let tokens = bpe.encode_with_special_tokens(&text);
     Ok(tokens.len() as u32)
 }
 
@@ -44,12 +39,12 @@ pub fn count_tokens(text: String) -> NapiResult<u32> {
 /// @returns Array of token count results
 #[napi]
 pub fn count_tokens_batch(texts: Vec<String>) -> NapiResult<Vec<TokenCountResult>> {
-    let tokenizer = get_tokenizer()?;
+    let bpe = cl100k_base().map_err(|e| napi::Error::from_reason(format!("Tokenizer error: {}", e)))?;
     
     let results: Vec<TokenCountResult> = texts
         .par_iter()
         .map(|text| {
-            let tokens = tokenizer.encode_with_special_tokens(text);
+            let tokens = bpe.encode_with_special_tokens(text);
             TokenCountResult {
                 text: text.clone(),
                 token_count: tokens.len() as u32,
@@ -68,8 +63,8 @@ pub fn count_tokens_batch(texts: Vec<String>) -> NapiResult<Vec<TokenCountResult
 #[napi]
 pub fn validate_token_limit(text: String, max_tokens: Option<u32>) -> NapiResult<bool> {
     let max = max_tokens.unwrap_or(2048);
-    let tokenizer = get_tokenizer()?;
-    let tokens = tokenizer.encode_with_special_tokens(&text);
+    let bpe = cl100k_base().map_err(|e| napi::Error::from_reason(format!("Tokenizer error: {}", e)))?;
+    let tokens = bpe.encode_with_special_tokens(&text);
     Ok(tokens.len() <= max as usize)
 }
 
@@ -85,8 +80,8 @@ pub fn chunk_by_tokens(
     max_tokens: u32,
     overlap: u32,
 ) -> NapiResult<Vec<TokenChunk>> {
-    let tokenizer = get_tokenizer()?;
-    let tokens = tokenizer.encode_with_special_tokens(&text);
+    let bpe = cl100k_base().map_err(|e| napi::Error::from_reason(format!("Tokenizer error: {}", e)))?;
+    let tokens = bpe.encode_with_special_tokens(&text);
     
     let mut chunks = Vec::new();
     let mut start_idx = 0u32;
@@ -98,7 +93,7 @@ pub fn chunk_by_tokens(
         let chunk_tokens: Vec<u32> = tokens[start_idx as usize..end_idx as usize].iter().map(|&t| t as u32).collect();
         
         // Decode back to text
-        let chunk_text = tokenizer
+        let chunk_text = bpe
             .decode(chunk_tokens)
             .unwrap_or_else(|_| String::new());
         
@@ -139,23 +134,47 @@ pub fn chunk_texts_by_tokens(
     max_tokens: u32,
     overlap: u32,
 ) -> NapiResult<Vec<Vec<TokenChunk>>> {
+    let bpe = cl100k_base().map_err(|e| napi::Error::from_reason(format!("Tokenizer error: {}", e)))?;
+    
     let results: Vec<Vec<TokenChunk>> = texts
         .par_iter()
-        .map(|text| chunk_by_tokens(text.clone(), max_tokens, overlap))
+        .map(|text| {
+            let tokens = bpe.encode_with_special_tokens(text);
+            let mut chunks = Vec::new();
+            let mut start_idx = 0u32;
+            
+            while start_idx < tokens.len() as u32 {
+                let end_idx = ((start_idx as usize + max_tokens as usize).min(tokens.len())) as u32;
+                let chunk_tokens: Vec<u32> = tokens[start_idx as usize..end_idx as usize].iter().map(|&t| t as u32).collect();
+                let chunk_text = bpe.decode(chunk_tokens).unwrap_or_else(|_| String::new());
+                
+                chunks.push(TokenChunk {
+                    text: chunk_text,
+                    token_count: end_idx - start_idx,
+                    start_token: start_idx,
+                    end_token: end_idx,
+                });
+                
+                let step = if max_tokens > overlap { max_tokens - overlap } else { 1 };
+                start_idx += step;
+                if end_idx >= tokens.len() as u32 { break; }
+            }
+            Ok(chunks)
+        })
         .collect::<NapiResult<Vec<_>>>()?;
-    
+
     Ok(results)
 }
 
 /// Get token count and character statistics for text
-/// 
+///
 /// @param text - The text to analyze
 /// @returns Token count, character count, and tokens per character ratio
 #[napi]
 pub fn get_token_stats(text: String) -> NapiResult<TokenStats> {
-    let tokenizer = get_tokenizer()?;
-    let tokens = tokenizer.encode_with_special_tokens(&text);
-    
+    let bpe = cl100k_base().map_err(|e| napi::Error::from_reason(format!("Tokenizer error: {}", e)))?;
+    let tokens = bpe.encode_with_special_tokens(&text);
+
     let token_count = tokens.len();
     let char_count = text.chars().count();
     let tokens_per_char = if char_count > 0 {
@@ -163,7 +182,7 @@ pub fn get_token_stats(text: String) -> NapiResult<TokenStats> {
     } else {
         0.0
     };
-    
+
     Ok(TokenStats {
         token_count: token_count as u32,
         char_count: char_count as u32,
@@ -180,7 +199,7 @@ pub struct TokenStats {
 }
 
 /// Filter texts that exceed token limit
-/// 
+///
 /// @param texts - Array of texts to filter
 /// @param max_tokens - Maximum allowed tokens
 /// @returns Array of texts that are within the limit
@@ -189,16 +208,16 @@ pub fn filter_by_token_limit(
     texts: Vec<String>,
     max_tokens: u32,
 ) -> NapiResult<Vec<String>> {
-    let tokenizer = get_tokenizer()?;
-    
+    let bpe = cl100k_base().map_err(|e| napi::Error::from_reason(format!("Tokenizer error: {}", e)))?;
+
     let filtered: Vec<String> = texts
         .into_par_iter()
         .filter(|text| {
-            let tokens = tokenizer.encode_with_special_tokens(text);
+            let tokens = bpe.encode_with_special_tokens(text);
             tokens.len() <= max_tokens as usize
         })
         .collect();
-    
+
     Ok(filtered)
 }
 
