@@ -5,7 +5,7 @@ import { scanDirectory, type ScannedFile } from "./fileScanner";
 import { parseDocument, type ParseFailureReason } from "../parsers/documentParser";
 import { VectorStore, type DocumentChunk } from "../vectorstore/vectorStore";
 import { chunkTextsBatch, type ChunkResult, ensureChunkTokenLimits, estimateTokenCount, MAX_EMBEDDING_TOKENS } from "../utils/textChunker";
-import { chunkTextsByTokens as chunkTextsByTokensNative, countTokens, validateTokenLimit, MAX_CHUNK_TOKENS as TOKENIZER_MAX_CHUNK_TOKENS } from "../utils/tokenAwareChunker";
+import { chunkTextsByTokens as chunkTextsByTokensNative, MAX_CHUNK_TOKENS as TOKENIZER_MAX_CHUNK_TOKENS } from "../utils/tokenAwareChunker";
 import { calculateFileHash } from "../utils/fileHash";
 import { type EmbeddingDynamicHandle, type LMStudioClient } from "@lmstudio/sdk";
 import { FailedFileRegistry } from "../utils/failedFileRegistry";
@@ -381,34 +381,17 @@ export class IndexManager {
 
       if (allChunks.length > 0) {
         try {
-          // With tokenizer-based chunking, all chunks should already be within limits
-          // This is a final safety validation using the native tokenizer
-          const safeChunks = allChunks.filter((chunk, idx) => {
-            // Use native tokenizer for accurate validation
-            const isValid = validateTokenLimit(chunk.text, MAX_EMBEDDING_TOKENS);
-            if (!isValid) {
-              const actualTokens = countTokens(chunk.text);
-              console.warn(
-                `Skipping chunk ${idx} from ${chunk.doc.file.name}: ${actualTokens} tokens exceeds limit of ${MAX_EMBEDDING_TOKENS}`,
-              );
-              return false;
-            }
-            return true;
-          });
-
-          if (safeChunks.length < allChunks.length) {
-            console.warn(
-              `Skipped ${allChunks.length - safeChunks.length} oversized chunks that exceeded token limit`,
-            );
-          }
-
-          // Log token statistics using native tokenizer for accuracy
+          // No need to validate - tokenizer-based chunking already ensures chunks are within limits
+          // The token count is already stored in each chunk from chunking time
+          const safeChunks = allChunks;
+          
+          // Log token statistics from pre-computed values
           const tokenStats = safeChunks.map(c => c.chunk.tokenEstimate);
           const minTokens = Math.min(...tokenStats, 0);
           const maxTokens = Math.max(...tokenStats, 0);
           const avgTokens = tokenStats.length > 0 ? Math.round(tokenStats.reduce((a, b) => a + b, 0) / tokenStats.length) : 0;
           console.log(
-            `[Token Stats] Chunks: ${safeChunks.length}, Min: ${minTokens}, Max: ${maxTokens}, Avg: ${avgTokens} tokens (native cl100k_base)`,
+            `[Token Stats] Chunks: ${safeChunks.length}, Min: ${minTokens}, Max: ${maxTokens}, Avg: ${avgTokens} tokens (pre-computed)`,
           );
 
           // Append newline to each chunk to satisfy embedding model's EOS token expectation
