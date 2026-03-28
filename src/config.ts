@@ -160,10 +160,20 @@ export const configSchematics = createConfigSchematics()
       min: 1,
       max: 8,
       displayName: "Number of Embedding Models",
-      subtitle: "How many instances of the embedding model to load. 1 = single model, 2-8 = multi-model parallelization. More = faster but uses more VRAM (each instance uses ~300MB).",
+      subtitle: "How many instances of the embedding model you have loaded in LM Studio. Each instance must be loaded separately in LM Studio. More = faster but uses more VRAM.",
       slider: { min: 1, max: 8, step: 1 },
     },
     1,
+  )
+  .field(
+    "embeddingParallelization.modelIdPattern",
+    "string",
+    {
+      displayName: "Model ID Pattern",
+      subtitle: "Pattern for model IDs. Use {i} as placeholder for instance number (1-based). Example: 'nomic-ai/nomic-embed-text-v1.5-GGUF-{i}' or just 'nomic-ai/nomic-embed-text-v1.5-GGUF' if all instances have same ID.",
+      placeholder: "nomic-ai/nomic-embed-text-v1.5-GGUF",
+    },
+    "nomic-ai/nomic-embed-text-v1.5-GGUF",
   )
   .field(
     "embeddingParallelization.batchSize",
@@ -172,8 +182,8 @@ export const configSchematics = createConfigSchematics()
       int: true,
       min: 10,
       max: 500,
-      displayName: "Batch Size",
-      subtitle: "Number of chunks per embedding API call. Larger = more efficient but uses more memory. Default: 100. For large-batch mode, use 300-500.",
+      displayName: "Embedding Batch Size",
+      subtitle: "Number of chunks per embedding API call. Larger = more efficient but uses more memory. Default: 100. Increase to 200-500 for faster embedding.",
       slider: { min: 10, max: 500, step: 10 },
     },
     100,
@@ -185,8 +195,8 @@ export const configSchematics = createConfigSchematics()
       int: true,
       min: 1,
       max: 20,
-      displayName: "Concurrent Batches",
-      subtitle: "Number of simultaneous embedding requests. Higher = faster but more network/memory pressure. Default: 5.",
+      displayName: "Embedding Concurrency",
+      subtitle: "Number of simultaneous embedding requests. Higher = faster but more network/memory pressure. Default: 5. Increase to 10-20 for faster embedding.",
       slider: { min: 1, max: 20, step: 1 },
     },
     5,

@@ -18,6 +18,7 @@ export interface RunIndexingParams {
   onProgress?: (progress: IndexingProgress) => void;
   // Embedding parallelization settings
   embeddingModelCount?: number;
+  embeddingModelIdPattern?: string;
   embeddingBatchSize?: number;
   embeddingConcurrency?: number;
 }
@@ -50,6 +51,7 @@ export async function runIndexingJob({
   vectorStore: existingVectorStore,
   onProgress,
   embeddingModelCount = 1,
+  embeddingModelIdPattern = "nomic-ai/nomic-embed-text-v1.5-GGUF",
   embeddingBatchSize = 100,
   embeddingConcurrency = 5,
 }: RunIndexingParams): Promise<RunIndexingResult> {
@@ -61,12 +63,12 @@ export async function runIndexingJob({
   }
 
   // Load embedding model(s) based on modelCount
-  // modelCount > 1 = multi-model mode, modelCount = 1 = single model mode
-  const embeddingModelId = "nomic-ai/nomic-embed-text-v1.5-GGUF";
+  // LM Studio supports multiple instances of the same model with different identifiers
   const isMultiModel = embeddingModelCount > 1;
 
-  console.log(`[BigRAG] Loading embedding model(s): ${embeddingModelId}`);
+  console.log(`[BigRAG] Loading embedding model(s)`);
   console.log(`[BigRAG] Mode: ${isMultiModel ? `multi-model (${embeddingModelCount} instances)` : "single model"}`);
+  console.log(`[BigRAG] Model ID pattern: ${embeddingModelIdPattern} (use {i} for instance number)`);
   console.log(`[BigRAG] Batch size: ${embeddingBatchSize}, Concurrency: ${embeddingConcurrency}`);
 
   const embeddingModels: EmbeddingDynamicHandle[] = [];
@@ -74,11 +76,17 @@ export async function runIndexingJob({
   try {
     if (isMultiModel) {
       // Load multiple model instances for parallel embedding
-      console.log(`[BigRAG] Loading ${embeddingModelCount} model instances for multi-model parallelization...`);
+      console.log(`[BigRAG] Loading ${embeddingModelCount} model instances...`);
       const loadPromises = Array.from({ length: embeddingModelCount }, async (_, i) => {
-        console.log(`[BigRAG] Loading model instance ${i + 1}/${embeddingModelCount}...`);
-        const model = await client.embedding.model(embeddingModelId, { signal: abortSignal });
-        console.log(`[BigRAG] Model instance ${i + 1}/${embeddingModelCount} loaded`);
+        const instanceNum = i + 1;
+        // Replace {i} placeholder with instance number, or use pattern as-is if no placeholder
+        const modelId = embeddingModelIdPattern.includes("{i}")
+          ? embeddingModelIdPattern.replace("{i}", instanceNum.toString())
+          : embeddingModelIdPattern;
+        
+        console.log(`[BigRAG] Loading model instance ${instanceNum}/${embeddingModelCount}: ${modelId}`);
+        const model = await client.embedding.model(modelId, { signal: abortSignal });
+        console.log(`[BigRAG] Model instance ${instanceNum}/${embeddingModelCount} loaded`);
         return model;
       });
 
@@ -88,7 +96,7 @@ export async function runIndexingJob({
     } else {
       // Single model mode
       console.log('[BigRAG] Loading single embedding model...');
-      const model = await client.embedding.model(embeddingModelId, { signal: abortSignal });
+      const model = await client.embedding.model(embeddingModelIdPattern, { signal: abortSignal });
       embeddingModels.push(model);
       console.log('[BigRAG] Embedding model loaded successfully');
     }
@@ -97,9 +105,10 @@ export async function runIndexingJob({
     console.error('[BigRAG] Failed to load embedding model:', errorMsg);
     console.error('[BigRAG] Make sure:');
     console.error('[BigRAG]   1. LM Studio is running');
-    console.error('[BigRAG]   2. nomic-ai/nomic-embed-text-v1.5-GGUF is downloaded');
-    console.error('[BigRAG]   3. The model is loaded (not unloaded) in LM Studio');
-    console.error('[BigRAG]   4. For multi-model: enough VRAM for multiple instances');
+    console.error('[BigRAG]   2. nomic-ai/nomic-embed-text-v1.5-GGUF (or your model) is downloaded');
+    console.error('[BigRAG]   3. The model instance(s) are loaded in LM Studio');
+    console.error('[BigRAG]   4. For multi-model: each instance has a unique identifier');
+    console.error('[BigRAG]   5. Model ID pattern uses {i} for instance numbers (e.g., "model-{i}")');
     throw new Error(`Failed to load embedding model: ${errorMsg}`);
   }
 
