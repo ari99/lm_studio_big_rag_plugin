@@ -154,6 +154,12 @@ export async function preprocess(
   const skipPreviouslyIndexed = pluginConfig.get("manualReindex.skipPreviouslyIndexed");
   const parseDelayMs = pluginConfig.get("parseDelayMs") ?? 0;
   const reindexRequested = pluginConfig.get("manualReindex.trigger");
+  
+  // Embedding parallelization settings
+  const embeddingModelCount = pluginConfig.get("embeddingParallelization.modelCount") ?? 1;
+  const embeddingModelIdPattern = pluginConfig.get("embeddingParallelization.modelIdPattern") ?? "nomic-ai/nomic-embed-text-v1.5-GGUF";
+  const embeddingBatchSize = pluginConfig.get("embeddingParallelization.batchSize") ?? 100;
+  const embeddingConcurrency = pluginConfig.get("embeddingParallelization.concurrency") ?? 5;
 
   // Validate configuration
   if (!documentsDir || documentsDir === "") {
@@ -239,6 +245,10 @@ export async function preprocess(
       parseDelayMs,
       reindexRequested,
       skipPreviouslyIndexed: pluginConfig.get("manualReindex.skipPreviouslyIndexed"),
+      embeddingModelCount,
+      embeddingModelIdPattern,
+      embeddingBatchSize,
+      embeddingConcurrency,
     });
 
     checkAbort(ctl.abortSignal);
@@ -270,6 +280,10 @@ export async function preprocess(
             parseDelayMs,
             vectorStore,
             forceReindex: true,
+            embeddingModelCount,
+            embeddingModelIdPattern,
+            embeddingBatchSize,
+            embeddingConcurrency,
             onProgress: (progress) => {
               if (progress.status === "scanning") {
                 indexStatus.setState({
@@ -490,6 +504,10 @@ interface ConfigReindexOpts {
   parseDelayMs: number;
   reindexRequested: boolean;
   skipPreviouslyIndexed: boolean;
+  embeddingModelCount: number;
+  embeddingModelIdPattern: string;
+  embeddingBatchSize: number;
+  embeddingConcurrency: number;
 }
 
 async function maybeHandleConfigTriggeredReindex({
@@ -503,6 +521,10 @@ async function maybeHandleConfigTriggeredReindex({
   parseDelayMs,
   reindexRequested,
   skipPreviouslyIndexed,
+  embeddingModelCount,
+  embeddingModelIdPattern,
+  embeddingBatchSize,
+  embeddingConcurrency,
 }: ConfigReindexOpts) {
   if (!reindexRequested) {
     return;
@@ -544,6 +566,10 @@ async function maybeHandleConfigTriggeredReindex({
       parseDelayMs,
       forceReindex: !skipPreviouslyIndexed,
       vectorStore: vectorStore ?? undefined,
+      embeddingModelCount,
+      embeddingModelIdPattern,
+      embeddingBatchSize,
+      embeddingConcurrency,
       onProgress: (progress) => {
         if (progress.status === "scanning") {
           status.setState({
