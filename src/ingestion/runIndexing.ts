@@ -1,6 +1,10 @@
 import { type LMStudioClient, type EmbeddingDynamicHandle } from "@lmstudio/sdk";
 import { IndexManager, type IndexingProgress, type IndexingResult } from "./indexManager";
 import { VectorStore } from "../vectorstore/vectorStore";
+import { exec } from "child_process";
+import { promisify } from "util";
+
+const execAsync = promisify(exec);
 
 export interface RunIndexingParams {
   client: LMStudioClient;
@@ -62,53 +66,85 @@ export async function runIndexingJob({
     await vectorStore.initialize();
   }
 
-  // Load embedding model(s) based on modelCount
-  // LM Studio supports multiple instances of the same model with different identifiers
+  // Load embedding model(s) using LM Studio CLI
+  // LM Studio requires explicit model loading via CLI for multiple instances
   const isMultiModel = embeddingModelCount > 1;
+  const baseModelId = embeddingModelIdPattern.replace("{i}", "").trim();
 
   console.log(`[BigRAG] Loading embedding model(s)`);
   console.log(`[BigRAG] Mode: ${isMultiModel ? `multi-model (${embeddingModelCount} instances)` : "single model"}`);
-  console.log(`[BigRAG] Model ID pattern: ${embeddingModelIdPattern} (use {i} for instance number)`);
+  console.log(`[BigRAG] Base model ID: ${baseModelId}`);
   console.log(`[BigRAG] Batch size: ${embeddingBatchSize}, Concurrency: ${embeddingConcurrency}`);
 
   const embeddingModels: EmbeddingDynamicHandle[] = [];
 
   try {
     if (isMultiModel) {
-      // Load multiple model instances for parallel embedding
-      console.log(`[BigRAG] Loading ${embeddingModelCount} model instances...`);
-      const loadPromises = Array.from({ length: embeddingModelCount }, async (_, i) => {
+      // Load multiple model instances using lms CLI
+      console.log(`[BigRAG] Loading ${embeddingModelCount} model instances using lms CLI...`);
+      
+      for (let i = 0; i < embeddingModelCount; i++) {
         const instanceNum = i + 1;
-        // Replace {i} placeholder with instance number, or use pattern as-is if no placeholder
-        const modelId = embeddingModelIdPattern.includes("{i}")
-          ? embeddingModelIdPattern.replace("{i}", instanceNum.toString())
-          : embeddingModelIdPattern;
+        const modelIdentifier = `${baseModelId}-${instanceNum}`;
         
-        console.log(`[BigRAG] Loading model instance ${instanceNum}/${embeddingModelCount}: ${modelId}`);
-        const model = await client.embedding.model(modelId, { signal: abortSignal });
-        console.log(`[BigRAG] Model instance ${instanceNum}/${embeddingModelCount} loaded`);
-        return model;
-      });
-
-      const loadedModels = await Promise.all(loadPromises);
-      embeddingModels.push(...loadedModels);
-      console.log(`[BigRAG] All ${embeddingModelCount} model instances loaded successfully`);
+        console.log(`[BigRAG] Loading model instance ${instanceNum}/${embeddingModelCount} with identifier: ${modelIdentifier}`);
+        
+        // Use lms CLI to load the model with a unique identifier
+        // The --yes flag auto-approves, --identifier sets the API identifier
+        const lmsCommand = `lms load -y --identifier "${modelIdentifier}" "${baseModelId}"`;
+        console.log(`[BigRAG] Executing: ${lmsCommand}`);
+        
+        try {
+          const { stdout, stderr } = await execAsync(lmsCommand, { timeout: 60000 });
+          if (stdout) console.log(`[BigRAG] lms output: ${stdout}`);
+          if (stderr) console.warn(`[BigRAG] lms warnings: ${stderr}`);
+          console.log(`[BigRAG] Model instance ${instanceNum}/${embeddingModelCount} loaded successfully`);
+        } catch (lmsError: any) {
+          // Model might already be loaded, which is fine
+          if (lmsError.message?.includes("already loaded") || lmsError.message?.includes("already exists")) {
+            console.log(`[BigRAG] Model instance ${instanceNum} already loaded, continuing...`);
+          } else {
+            throw lmsError;
+          }
+        }
+      }
+      
+      console.log(`[BigRAG] All ${embeddingModelCount} model instances loaded`);
     } else {
-      // Single model mode
-      console.log('[BigRAG] Loading single embedding model...');
-      const model = await client.embedding.model(embeddingModelIdPattern, { signal: abortSignal });
-      embeddingModels.push(model);
-      console.log('[BigRAG] Embedding model loaded successfully');
+      // Single model mode - just ensure it's loaded
+      console.log(`[BigRAG] Ensuring single embedding model is loaded...`);
+      const lmsCommand = `lms load -y --identifier "${baseModelId}" "${baseModelId}"`;
+      try {
+        await execAsync(lmsCommand, { timeout: 60000 });
+        console.log(`[BigRAG] Model loaded: ${baseModelId}`);
+      } catch (lmsError: any) {
+        if (!lmsError.message?.includes("already loaded")) {
+          console.warn(`[BigRAG] Could not load model via CLI: ${lmsError.message}`);
+          console.warn(`[BigRAG] Will try to get handle anyway...`);
+        }
+      }
     }
+
+    // Now get handles to all loaded models
+    console.log(`[BigRAG] Getting handles to loaded model instances...`);
+    for (let i = 0; i < embeddingModelCount; i++) {
+      const instanceNum = i + 1;
+      const modelIdentifier = isMultiModel ? `${baseModelId}-${instanceNum}` : baseModelId;
+      
+      console.log(`[BigRAG] Getting handle to model: ${modelIdentifier}`);
+      const model = await client.embedding.model(modelIdentifier, { signal: abortSignal });
+      embeddingModels.push(model);
+    }
+
+    console.log(`[BigRAG] All model handles acquired successfully`);
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     console.error('[BigRAG] Failed to load embedding model:', errorMsg);
     console.error('[BigRAG] Make sure:');
     console.error('[BigRAG]   1. LM Studio is running');
     console.error('[BigRAG]   2. nomic-ai/nomic-embed-text-v1.5-GGUF (or your model) is downloaded');
-    console.error('[BigRAG]   3. The model instance(s) are loaded in LM Studio');
-    console.error('[BigRAG]   4. For multi-model: each instance has a unique identifier');
-    console.error('[BigRAG]   5. Model ID pattern uses {i} for instance numbers (e.g., "model-{i}")');
+    console.error('[BigRAG]   3. lms CLI is available in PATH');
+    console.error('[BigRAG]   4. For multi-model: enough VRAM for multiple instances');
     throw new Error(`Failed to load embedding model: ${errorMsg}`);
   }
 
