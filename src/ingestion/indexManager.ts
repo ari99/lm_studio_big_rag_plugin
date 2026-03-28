@@ -374,10 +374,9 @@ export class IndexManager {
         });
       }
 
-      // Embed in batches of 50 for network stability (prevents WebSocket timeouts)
-      // Reduced from 200 for better reliability over LM Link
-      // See FINAL_PERFORMANCE_REPORT.md for benchmark details
-      const EMBEDDING_BATCH_SIZE = 50;
+      // Embed in batches to avoid timeout and improve reliability
+      // Smaller batch size (10) for better reliability with large datasets
+      const EMBEDDING_BATCH_SIZE = 10;
       const MAX_RETRIES = 3;
 
       if (allChunks.length > 0) {
@@ -424,12 +423,22 @@ export class IndexManager {
             const totalBatches = Math.ceil(allTexts.length / EMBEDDING_BATCH_SIZE);
             let lastError: Error | null = null;
 
+            console.log(`[Embedding] Starting batch ${batchNumber}/${totalBatches} (${batch.length} chunks)...`);
+
             // Retry logic for network stability
             for (let retry = 0; retry < MAX_RETRIES; retry++) {
               try {
-                const result = await this.options.embeddingModel.embed(batch);
-                allEmbeddings.push(...result);
+                // Add timeout to embedding call
+                const embedPromise = this.options.embeddingModel.embed(batch);
+                const timeoutPromise = new Promise<never>((_, reject) => 
+                  setTimeout(() => reject(new Error(`Embedding timeout after 60s`)), 60000)
+                );
                 
+                const result = await Promise.race([embedPromise, timeoutPromise]);
+                allEmbeddings.push(...result);
+
+                console.log(`[Embedding] Batch ${batchNumber}/${totalBatches} complete (${allEmbeddings.length}/${safeChunks.length} chunks)`);
+
                 if (onProgress) {
                   onProgress({
                     totalFiles: safeChunks.length,
@@ -446,6 +455,7 @@ export class IndexManager {
                 break;
               } catch (error) {
                 lastError = error instanceof Error ? error : new Error(String(error));
+                console.error(`[Embedding] Batch ${batchNumber}/${totalBatches} failed:`, lastError.message);
                 if (retry < MAX_RETRIES - 1) {
                   console.log(`  Embedding batch ${batchNumber}/${totalBatches} failed, retry ${retry + 1}/${MAX_RETRIES}...`);
                   if (onProgress) {
