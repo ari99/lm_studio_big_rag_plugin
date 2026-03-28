@@ -71,10 +71,9 @@ export async function runIndexingJob({
       embeddingModel = loadedModels[0];
       console.log('[BigRAG] Using already loaded embedding model');
     } else {
-      // No models loaded, try to get the first downloaded model (this will load it)
+      // No models loaded, try to load the first downloaded model
       console.log('[BigRAG] No embedding models loaded. Attempting to load first available model...');
-      // client.embedding.model() will load the model if it's not already loaded
-      // We need to find a model key - try the common one first
+      // Try common model IDs
       const commonModelIds = [
         'nomic-ai/nomic-embed-text-v1.5',
         'nomic-ai/nomic-embed-text-v1.5-GGUF',
@@ -83,7 +82,8 @@ export async function runIndexingJob({
       
       for (const modelId of commonModelIds) {
         try {
-          embeddingModel = await client.embedding.model(modelId, { signal: abortSignal });
+          // Use .load() to explicitly load the model (not just get a handle)
+          embeddingModel = await client.embedding.load(modelId);
           console.log(`[BigRAG] Loaded embedding model: ${modelId}`);
           break;
         } catch (e) {
@@ -92,7 +92,7 @@ export async function runIndexingJob({
       }
       
       if (!embeddingModel) {
-        throw new Error('Could not load any embedding model. Please download one first (e.g., nomic-ai/nomic-embed-text-v1.5).');
+        throw new Error('Could not load any embedding model. Please download one first (e.g., nomic-ai/nomic-embed-text-v1.5). Run: lms get nomic-ai/nomic-embed-text-v1.5');
       }
     }
   } catch (error) {
