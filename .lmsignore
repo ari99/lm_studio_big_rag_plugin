@@ -13,6 +13,10 @@ dist/
 
 # Benchmark results
 benchmarks/*.json
+benchmarks/results/
+
+# Benchmark data (generated test datasets)
+benchmark-data/
 
 # Git
 .git/

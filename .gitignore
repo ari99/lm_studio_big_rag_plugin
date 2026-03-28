@@ -14,6 +14,10 @@ npm-debug.log*
 # OCR language packs and other large binaries
 eng.traineddata
 
+# Benchmark data (generated test datasets)
+benchmark-data/
+benchmarks/results/
+
 # Misc editor/system files
 .DS_Store
 *.swp

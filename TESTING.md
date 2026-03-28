@@ -1,62 +1,69 @@
-# Testing Guide for Big RAG Plugin
+# Testing Guide for BigRAG Plugin
 
-This guide provides instructions for testing the Big RAG plugin with various scenarios and dataset sizes.
+**Embedding Model:** nomic-ai/nomic-embed-text-v1.5-GGUF  
+**Test Datasets:** 1000, 5000, 10000 files (generated)  
+**Platforms:** Linux, macOS (Intel/ARM), Windows
+
+---
 
 ## Prerequisites
 
-1. LM Studio installed and running
-2. At least one embedding model loaded (e.g., `nomic-ai/nomic-embed-text-v1.5-GGUF`)
-3. At least one LLM loaded for chat
-4. Node.js and npm installed
+1. **LM Studio** installed and running
+2. **Embedding model** loaded: `nomic-ai/nomic-embed-text-v1.5-GGUF`
+3. **Node.js 18+** and npm installed
+4. **Rust toolchain** installed (for native module)
 
-## Setup for Testing
+### Rust Toolchain Installation
 
-### 0. Run Parser Smoke Tests
-
-Before larger end-to-end runs, ensure the core parsers succeed:
-
+**Linux (Fedora/Ubuntu):**
 ```bash
-npm run test
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+rustc --version  # Verify installation
 ```
 
-This builds the project and executes the HTML/Markdown/Text regression tests located in `src/tests/parseDocument.test.ts`.
+**macOS:**
+```bash
+brew install rustup
+rustup-init
+```
+
+**Windows:**
+```powershell
+winget install Rustlang.Rustup
+```
+
+---
+
+## Setup for Testing
 
 ### 1. Install Dependencies
 
 ```bash
-cd big-rag-plugin
+cd lm_studio_big_rag_plugin
 npm install
+
+# Build Rust native module
+cd native
+npm install
+npm run build
+cd ..
+
+# Build TypeScript
+npm run build
 ```
 
-### 2. Create Test Data
-
-Create a test directory structure:
+### 2. Generate Test Datasets
 
 ```bash
-mkdir -p ~/test-documents/subfolder1
-mkdir -p ~/test-documents/subfolder2/deep
-```
+# Generate benchmark datasets (1000, 5000, 10000 files)
+node dist/benchmarks/generateDataset.js 1000
+node dist/benchmarks/generateDataset.js 5000
+node dist/benchmarks/generateDataset.js 10000
 
-Add some test files:
-
-```bash
-# Create a simple text file
-echo "This is a test document about artificial intelligence and machine learning." > ~/test-documents/test1.txt
-
-# Create an HTML file
-cat > ~/test-documents/test2.html << 'EOF'
-<!DOCTYPE html>
-<html>
-<head><title>Test Document</title></head>
-<body>
-<h1>Machine Learning Basics</h1>
-<p>Machine learning is a subset of artificial intelligence that focuses on algorithms that can learn from data.</p>
-</body>
-</html>
-EOF
-
-# Create a markdown file in subfolder
-echo "# Deep Learning\n\nDeep learning uses neural networks with multiple layers." > ~/test-documents/subfolder1/test3.md
+# Datasets created in benchmark-data/
+ls -la benchmark-data/
+# 1000-files/  5000-files/  10000-files/
 ```
 
 ### 3. Create Vector Store Directory
@@ -65,214 +72,328 @@ echo "# Deep Learning\n\nDeep learning uses neural networks with multiple layers
 mkdir -p ~/.lmstudio/big-rag-test-db
 ```
 
+---
+
 ## Test Scenarios
 
-### Test 1: Basic Functionality
+### Test 1: Parser Smoke Tests
 
-**Objective**: Verify the plugin can index and retrieve from a small dataset.
+**Objective:** Verify core parsers succeed before large-scale tests.
 
-**Steps**:
-1. Start the plugin in dev mode:
+```bash
+npm run test
+```
+
+**Expected:** All parser tests pass (HTML, Markdown, Text)
+
+---
+
+### Test 2: Tokenizer vs Heuristic Comparison
+
+**Objective:** Compare token estimation accuracy and warning rates.
+
+**Steps:**
+
+1. **Run heuristic benchmark (baseline):**
    ```bash
-   npm run dev
+   node dist/benchmarks/realEmbedBench.js \
+     --dataset benchmark-data/1000-files \
+     --method heuristic \
+     --output benchmarks/results/heuristic-1000.json
    ```
 
-2. Configure in LM Studio:
-   - Documents Directory: `~/test-documents`
-   - Vector Store Directory: `~/.lmstudio/big-rag-test-db`
-   - Keep other settings at defaults
-
-3. Send a test query:
-   ```
-   What is machine learning?
-   ```
-
-4. **Expected Result**: The plugin should:
-   - Scan and index the 3 test files
-   - Retrieve relevant passages
-   - Include citations in the response
-
-**Success Criteria**:
-- ✅ Indexing completes without errors
-- ✅ Retrieval finds relevant content
-- ✅ Response includes citations from test files
-
-### Test 2: Large Directory Handling
-
-**Objective**: Test with a larger dataset (100+ files).
-
-**Steps**:
-1. Generate test files:
+2. **Run tokenizer benchmark (experimental):**
    ```bash
-   for i in {1..100}; do
-     echo "Document $i: This document discusses topic $((i % 10)) in detail." > ~/test-documents/doc_$i.txt
-   done
+   node dist/benchmarks/realEmbedBench.js \
+     --dataset benchmark-data/1000-files \
+     --method tokenizer \
+     --output benchmarks/results/tokenizer-1000.json
    ```
 
-2. Clear the vector store:
+3. **Check server logs for warnings:**
    ```bash
-   rm -rf ~/.lmstudio/big-rag-test-db/*
+   # Token limit warnings
+   grep -c "exceeds model context length" ~/.lmstudio/logs/*.log
+   
+   # EOS/SEP warnings
+   grep -c "not SEP" ~/.lmstudio/logs/*.log
+   
+   # View recent warnings
+   tail -100 ~/.lmstudio/logs/*.log | grep -i "warning"
    ```
 
-3. Restart the plugin and send a query
+**Success Criteria:**
+- ✅ Tokenizer has 0 token limit warnings
+- ✅ Tokenizer has 0 EOS/SEP warnings
+- ✅ Tokenizer overhead <15% of total indexing time
 
-4. **Expected Result**: 
-   - Indexing should process all 103 files
-   - Progress should be visible in LM Studio
-   - Retrieval should work after indexing
+---
 
-**Success Criteria**:
-- ✅ All files are processed
-- ✅ No memory issues
-- ✅ Indexing completes in reasonable time
-- ✅ Retrieval returns relevant results
+### Test 3: Large-Scale Benchmark (1000-10000 files)
 
-### Test 3: Multiple File Types
+**Objective:** Measure performance at scale.
 
-**Objective**: Verify all supported file types are processed correctly.
+**Steps:**
 
-**Steps**:
-1. Add different file types to test directory:
-   - Copy a sample PDF
-   - Copy a sample EPUB
-   - Copy a sample image (if OCR enabled)
+```bash
+# Run benchmarks for each dataset size
+for SIZE in 1000 5000 10000; do
+  echo "=== Benchmarking $SIZE files ==="
+  
+  # Clear vector store
+  rm -rf ~/.lmstudio/big-rag-test-db/*
+  
+  # Run benchmark
+  node dist/benchmarks/realEmbedBench.js \
+    --dataset benchmark-data/${SIZE}-files \
+    --output benchmarks/results/${SIZE}-files.json \
+    --log-stats
+  
+  # Wait between runs
+  sleep 5
+done
+```
 
-2. Clear vector store and reindex
+**Metrics to Track:**
 
-3. Query for content that should be in each file type
+| Metric | 1000 files | 5000 files | 10000 files |
+|--------|------------|------------|-------------|
+| Directory scan time | TBD | TBD | TBD |
+| File hashing time | TBD | TBD | TBD |
+| Parsing time | TBD | TBD | TBD |
+| Chunking time | TBD | TBD | TBD |
+| Embedding time | TBD | TBD | TBD |
+| Vector indexing time | TBD | TBD | TBD |
+| **Total time** | TBD | TBD | TBD |
+| **Throughput (files/sec)** | TBD | TBD | TBD |
+| **Memory peak (MB)** | TBD | TBD | TBD |
 
-**Success Criteria**:
-- ✅ PDF files are parsed correctly
-- ✅ EPUB files are parsed correctly
-- ✅ HTML files are parsed correctly
-- ✅ Text files are parsed correctly
-- ✅ Images are processed (if OCR enabled)
+---
 
 ### Test 4: Incremental Indexing
 
-**Objective**: Verify that already-indexed files are skipped.
+**Objective:** Verify already-indexed files are skipped.
 
-**Steps**:
-1. Index the test directory (first time)
-2. Note the indexing time
-3. Restart the plugin
-4. Send another query (triggers reindex check)
-5. Note the indexing time
+**Steps:**
 
-**Expected Result**: Second indexing should be much faster as files are already indexed.
+1. **First indexing run:**
+   ```bash
+   node dist/benchmarks/realEmbedBench.js \
+     --dataset benchmark-data/1000-files \
+     --output benchmarks/results/incremental-first.json
+   ```
+   Note the indexing time: `TIME1`
 
-**Success Criteria**:
+2. **Second indexing run (no changes):**
+   ```bash
+   node dist/benchmarks/realEmbedBench.js \
+     --dataset benchmark-data/1000-files \
+     --output benchmarks/results/incremental-second.json
+   ```
+   Note the indexing time: `TIME2`
+
+3. **Add new files:**
+   ```bash
+   for i in {1..100}; do
+     echo "New document $i" > benchmark-data/1000-files/new_$i.txt
+   done
+   ```
+
+4. **Third indexing run (with new files):**
+   ```bash
+   node dist/benchmarks/realEmbedBench.js \
+     --dataset benchmark-data/1000-files \
+     --output benchmarks/results/incremental-third.json
+   ```
+
+**Expected Results:**
+- `TIME2` << `TIME1` (skipped all files)
+- Third run only processes 100 new files
+
+**Success Criteria:**
 - ✅ Already-indexed files are skipped
 - ✅ Only new/modified files are processed
 - ✅ Retrieval still works correctly
 
+---
+
 ### Test 5: Concurrent Processing
 
-**Objective**: Test different concurrency settings.
+**Objective:** Test different concurrency settings.
 
-**Steps**:
-1. Set `maxConcurrentFiles` to 1
-2. Index 50 files and note the time
-3. Clear vector store
-4. Set `maxConcurrentFiles` to 5
-5. Index the same 50 files and note the time
+**Steps:**
 
-**Expected Result**: Higher concurrency should be faster (but use more memory).
+1. **Low concurrency (maxConcurrentFiles = 1):**
+   ```bash
+   node dist/benchmarks/realEmbedBench.js \
+     --dataset benchmark-data/1000-files \
+     --max-concurrent 1 \
+     --output benchmarks/results/concurrent-1.json
+   ```
 
-**Success Criteria**:
-- ✅ Both settings work correctly
-- ✅ Higher concurrency is faster
+2. **Medium concurrency (maxConcurrentFiles = 5):**
+   ```bash
+   node dist/benchmarks/realEmbedBench.js \
+     --dataset benchmark-data/1000-files \
+     --max-concurrent 5 \
+     --output benchmarks/results/concurrent-5.json
+   ```
+
+3. **High concurrency (maxConcurrentFiles = 10):**
+   ```bash
+   node dist/benchmarks/realEmbedBench.js \
+     --dataset benchmark-data/1000-files \
+     --max-concurrent 10 \
+     --output benchmarks/results/concurrent-10.json
+   ```
+
+**Expected Results:**
+- Higher concurrency = faster (to a point)
+- Higher concurrency = more memory usage
+
+**Success Criteria:**
+- ✅ All settings work correctly
+- ✅ Higher concurrency is faster (up to optimal point)
 - ✅ No race conditions or errors
+
+---
 
 ### Test 6: Retrieval Threshold Tuning
 
-**Objective**: Test different threshold settings.
+**Objective:** Test different affinity threshold settings.
 
-**Steps**:
-1. Index test documents
-2. Set `retrievalAffinityThreshold` to 0.9 (very strict)
-3. Send a query
-4. Set `retrievalAffinityThreshold` to 0.3 (very loose)
-5. Send the same query
+**Steps:**
 
-**Expected Result**: 
+1. **Index test documents:**
+   ```bash
+   node dist/benchmarks/realEmbedBench.js \
+     --dataset benchmark-data/1000-files \
+     --index-only
+   ```
+
+2. **High threshold (0.9 - very strict):**
+   ```bash
+   node dist/benchmarks/searchBench.js \
+     --dataset benchmark-data/1000-files \
+     --threshold 0.9 \
+     --query "artificial intelligence"
+   ```
+
+3. **Medium threshold (0.5 - default):**
+   ```bash
+   node dist/benchmarks/searchBench.js \
+     --dataset benchmark-data/1000-files \
+     --threshold 0.5 \
+     --query "artificial intelligence"
+   ```
+
+4. **Low threshold (0.3 - very loose):**
+   ```bash
+   node dist/benchmarks/searchBench.js \
+     --dataset benchmark-data/1000-files \
+     --threshold 0.3 \
+     --query "artificial intelligence"
+   ```
+
+**Expected Results:**
 - High threshold: Fewer, more relevant results
 - Low threshold: More results, some less relevant
 
-**Success Criteria**:
+**Success Criteria:**
 - ✅ Threshold affects number of results
 - ✅ Results are properly filtered
 - ✅ No errors with extreme values
 
-### Test 7: OCR Testing (Optional)
+---
 
-**Objective**: Verify OCR works for image files.
+### Test 7: Cross-Platform Compatibility
 
-**Steps**:
-1. Enable OCR in settings
-2. Add an image with text to test directory
-3. Clear vector store and reindex
-4. Query for content that's in the image
+**Objective:** Verify plugin works on all target platforms.
 
-**Expected Result**: Text from image should be extracted and searchable.
+**Platforms to Test:**
 
-**Success Criteria**:
-- ✅ Image is processed
-- ✅ Text is extracted correctly
-- ✅ Content is retrievable
+| Platform | Status | Notes |
+|----------|--------|-------|
+| Linux x86_64 | TBD | Native (Fedora) |
+| macOS x86_64 | TBD | Intel Mac |
+| macOS aarch64 | TBD | M1/M2/M3 Mac |
+| Windows x86_64 | TBD | Windows 10/11 |
+
+**Test Checklist:**
+
+- [ ] Native module builds successfully
+- [ ] TypeScript compiles without errors
+- [ ] Plugin loads in LM Studio
+- [ ] Indexing completes successfully
+- [ ] Retrieval returns results
+- [ ] No platform-specific errors
+
+---
 
 ### Test 8: Error Handling
 
-**Objective**: Verify graceful handling of errors.
+**Objective:** Verify graceful handling of errors.
 
-**Test Cases**:
+**Test Cases:**
 
-1. **Invalid Directory**:
-   - Set documents directory to non-existent path
-   - Send a query
-   - Expected: Warning message, no crash
+1. **Invalid Directory:**
+   ```bash
+   node dist/benchmarks/realEmbedBench.js \
+     --dataset /nonexistent/path \
+     --output benchmarks/results/error-invalid-dir.json
+   ```
+   **Expected:** Warning message, no crash
 
-2. **Corrupted File**:
-   - Add a corrupted PDF to test directory
-   - Reindex
-   - Expected: File is skipped with error log, indexing continues
+2. **Corrupted File:**
+   ```bash
+   # Create corrupted PDF
+   echo "not a real pdf" > benchmark-data/1000-files/corrupted.pdf
+   
+   # Re-run indexing
+   node dist/benchmarks/realEmbedBench.js \
+     --dataset benchmark-data/1000-files
+   ```
+   **Expected:** File is skipped with error log, indexing continues
 
-3. **No Write Permission**:
-   - Set vector store directory to read-only location
-   - Try to index
-   - Expected: Clear error message
+3. **No Write Permission:**
+   ```bash
+   # Create read-only directory
+   mkdir -p /tmp/readonly-db
+   chmod 555 /tmp/readonly-db
+   
+   node dist/benchmarks/realEmbedBench.js \
+     --vector-store /tmp/readonly-db
+   ```
+   **Expected:** Clear error message
 
-4. **Disk Full** (simulated):
-   - Not easily testable, but should fail gracefully
-
-**Success Criteria**:
+**Success Criteria:**
 - ✅ Plugin doesn't crash
 - ✅ Clear error messages
 - ✅ Other files continue to process
 
+---
+
 ## Performance Benchmarks
 
-### Small Dataset (10 files, ~1MB total)
-- **Expected Indexing Time**: 10-30 seconds
-- **Expected Query Time**: < 1 second
-- **Memory Usage**: < 200MB
+### Expected Performance by Dataset Size
 
-### Medium Dataset (100 files, ~10MB total)
-- **Expected Indexing Time**: 1-3 minutes
-- **Expected Query Time**: < 2 seconds
-- **Memory Usage**: < 500MB
+| Dataset | Files | Est. Chunks | Est. Time (heuristic) | Est. Time (tokenizer) | Throughput |
+|---------|-------|-------------|----------------------|----------------------|------------|
+| Small | 1000 | ~63,000 | ~15-20 min | ~17-23 min | ~50-65 files/min |
+| Medium | 5000 | ~315,000 | ~75-100 min | ~85-115 min | ~50-65 files/min |
+| Large | 10000 | ~630,000 | ~150-200 min | ~170-230 min | ~50-65 files/min |
 
-### Large Dataset (1000 files, ~100MB total)
-- **Expected Indexing Time**: 10-30 minutes
-- **Expected Query Time**: < 3 seconds
-- **Memory Usage**: < 1GB
+*Note: Times vary based on hardware, embedding API speed, and network latency.*
 
-### Very Large Dataset (10000+ files, 1GB+ total)
-- **Expected Indexing Time**: 2-6 hours
-- **Expected Query Time**: < 5 seconds
-- **Memory Usage**: 1-3GB
+### Memory Usage Expectations
 
-*Note: Times vary based on hardware, file types, and OCR usage.*
+| Dataset | Peak Memory (heuristic) | Peak Memory (tokenizer) |
+|---------|------------------------|------------------------|
+| 1000 files | ~200-400 MB | ~250-450 MB |
+| 5000 files | ~500-800 MB | ~600-900 MB |
+| 10000 files | ~1-1.5 GB | ~1.2-1.7 GB |
+
+---
 
 ## Debugging
 
@@ -284,11 +405,27 @@ The plugin uses LM Studio's logging system. To see debug output:
 2. Look for messages prefixed with plugin name
 3. Use `ctl.debug()` calls in code for detailed logging
 
+### Monitor Server Logs
+
+```bash
+# Watch logs in real-time
+tail -f ~/.lmstudio/logs/*.log
+
+# Filter for BigRAG messages
+tail -f ~/.lmstudio/logs/*.log | grep -i "bigrag\|big-rag"
+
+# Filter for warnings/errors
+tail -f ~/.lmstudio/logs/*.log | grep -i "warning\|error"
+
+# Count token limit warnings
+grep -c "exceeds model context" ~/.lmstudio/logs/*.log
+```
+
 ### Common Issues
 
 1. **"No relevant content found"**
    - Check that indexing completed
-   - Lower the retrieval threshold
+   - Lower the retrieval threshold (try 0.3-0.4)
    - Verify query matches document content
 
 2. **"Vector store not initialized"**
@@ -306,54 +443,86 @@ The plugin uses LM Studio's logging system. To see debug output:
    - Process documents in smaller batches
    - Check for memory leaks in parsers
 
+5. **Token limit warnings**
+   - Switch to tokenizer-based chunking (experimental branch)
+   - Reduce MAX_CHUNK_TOKENS setting
+   - Check chunk size configuration
+
+---
+
+## Benchmark Results
+
+### Current Baseline (2026-03-28)
+
+See [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md) for complete results.
+
+### Pending Tests
+
+- [ ] Tokenizer vs heuristic comparison
+- [ ] 1000-file benchmark
+- [ ] 5000-file benchmark
+- [ ] 10000-file benchmark
+- [ ] Cross-platform tests
+
+---
+
 ## Cleanup
 
 After testing, clean up test data:
 
 ```bash
-# Remove test documents
-rm -rf ~/test-documents
+# Remove benchmark datasets
+rm -rf benchmark-data/
 
 # Remove test vector store
 rm -rf ~/.lmstudio/big-rag-test-db
+
+# Remove benchmark results
+rm -rf benchmarks/results/
 ```
+
+---
 
 ## Automated Testing (Future)
 
-For automated testing, consider:
+For automated testing in CI/CD:
 
-1. Unit tests for parsers
-2. Integration tests for indexing pipeline
-3. Performance benchmarks
-4. Regression tests for bug fixes
+```bash
+# Run all tests
+npm run test:all
 
-Example test structure:
+# Run benchmarks
+npm run bench
 
-```typescript
-describe('DocumentParser', () => {
-  it('should parse HTML correctly', async () => {
-    const result = await parseHTML('test.html');
-    expect(result).toContain('expected text');
-  });
-});
+# Run specific benchmark
+node dist/benchmarks/realEmbedBench.js \
+  --dataset benchmark-data/1000-files \
+  --method tokenizer \
+  --ci-mode
 ```
+
+---
 
 ## Reporting Issues
 
 When reporting issues, include:
 
-1. Plugin version
+1. Plugin version and branch (e.g., `experimental`)
 2. LM Studio version
-3. Operating system
+3. Operating system and version
 4. Dataset size and composition
 5. Configuration settings
 6. Error messages and logs
 7. Steps to reproduce
+8. Server log excerpts (~50 lines around error)
+
+---
 
 ## Performance Tuning Checklist
 
-- [ ] Tested with small dataset
-- [ ] Tested with large dataset
+- [ ] Tested with small dataset (1000 files)
+- [ ] Tested with medium dataset (5000 files)
+- [ ] Tested with large dataset (10000 files)
 - [ ] Optimized chunk size for use case
 - [ ] Tuned retrieval threshold
 - [ ] Adjusted concurrency for hardware
@@ -362,4 +531,10 @@ When reporting issues, include:
 - [ ] Checked memory usage under load
 - [ ] Tested error handling
 - [ ] Documented optimal settings
+- [ ] Cross-platform tests passed
 
+---
+
+*Last updated: 2026-03-28*  
+*Version: 1.0 (Experimental)*  
+*Branch: experimental*
