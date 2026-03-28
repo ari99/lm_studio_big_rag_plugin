@@ -4,7 +4,7 @@ import * as path from "path";
 import { scanDirectory, type ScannedFile } from "./fileScanner";
 import { parseDocument, type ParseFailureReason } from "../parsers/documentParser";
 import { VectorStore, type DocumentChunk } from "../vectorstore/vectorStore";
-import { chunkTextsBatch, type ChunkResult, ensureChunkTokenLimits } from "../utils/textChunker";
+import { chunkTextsBatch, type ChunkResult, ensureChunkTokenLimits, estimateTokenCount, MAX_EMBEDDING_TOKENS } from "../utils/textChunker";
 import { calculateFileHash } from "../utils/fileHash";
 import { type EmbeddingDynamicHandle, type LMStudioClient } from "@lmstudio/sdk";
 import { FailedFileRegistry } from "../utils/failedFileRegistry";
@@ -376,7 +376,6 @@ export class IndexManager {
         try {
           // SAFETY CHECK: Filter out any chunks that still exceed the embedding token limit
           // This is a last line of defense before sending to the embedding model
-          const { estimateTokenCount, MAX_EMBEDDING_TOKENS } = await import("../utils/textChunker");
           const safeChunks = allChunks.filter((chunk, idx) => {
             const tokens = estimateTokenCount(chunk.text);
             if (tokens > MAX_EMBEDDING_TOKENS) {
@@ -393,6 +392,15 @@ export class IndexManager {
               `Skipped ${allChunks.length - safeChunks.length} oversized chunks that exceeded token limit`,
             );
           }
+
+          // Log token statistics for debugging
+          const tokenStats = safeChunks.map(c => estimateTokenCount(c.text));
+          const minTokens = Math.min(...tokenStats, 0);
+          const maxTokens = Math.max(...tokenStats, 0);
+          const avgTokens = tokenStats.length > 0 ? Math.round(tokenStats.reduce((a, b) => a + b, 0) / tokenStats.length) : 0;
+          console.log(
+            `[Token Stats] Chunks: ${safeChunks.length}, Min: ${minTokens}, Max: ${maxTokens}, Avg: ${avgTokens} tokens`,
+          );
 
           const allTexts = safeChunks.map(c => c.text);
           const allEmbeddings: any[] = [];

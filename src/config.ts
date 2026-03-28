@@ -60,12 +60,12 @@ export const configSchematics = createConfigSchematics()
     {
       int: true,
       min: 128,
-      max: 2048,
+      max: 1500,
       displayName: "Chunk Size",
-      subtitle: "Size of text chunks for embedding (in tokens).",
-      slider: { min: 128, max: 2048, step: 128 },
+      subtitle: "Size of text chunks for embedding (in tokens). Max 1500 to stay under 2048 token embedding limit.",
+      slider: { min: 128, max: 1500, step: 128 },
     },
-    512,
+    400,
   )
   .field(
     "chunkOverlap",

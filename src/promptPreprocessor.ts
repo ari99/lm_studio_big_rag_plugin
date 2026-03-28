@@ -276,6 +276,21 @@ export async function preprocess(
                   status: "loading",
                   text: `Scanning: ${progress.currentFile}`,
                 });
+              } else if (progress.status === "parsing") {
+                indexStatus.setState({
+                  status: "loading",
+                  text: `Parsing: ${progress.phaseProgress}`,
+                });
+              } else if (progress.status === "chunking") {
+                indexStatus.setState({
+                  status: "loading",
+                  text: `Chunking: ${progress.phaseProgress}`,
+                });
+              } else if (progress.status === "embedding") {
+                indexStatus.setState({
+                  status: "loading",
+                  text: `Embedding: ${progress.phaseProgress}`,
+                });
               } else if (progress.status === "indexing") {
                 const success = progress.successfulFiles ?? 0;
                 const failed = progress.failedFiles ?? 0;
@@ -534,6 +549,21 @@ async function maybeHandleConfigTriggeredReindex({
           status.setState({
             status: "loading",
             text: `Scanning: ${progress.currentFile}`,
+          });
+        } else if (progress.status === "parsing") {
+          status.setState({
+            status: "loading",
+            text: `Parsing: ${progress.phaseProgress}`,
+          });
+        } else if (progress.status === "chunking") {
+          status.setState({
+            status: "loading",
+            text: `Chunking: ${progress.phaseProgress}`,
+          });
+        } else if (progress.status === "embedding") {
+          status.setState({
+            status: "loading",
+            text: `Embedding: ${progress.phaseProgress}`,
           });
         } else if (progress.status === "indexing") {
           const success = progress.successfulFiles ?? 0;

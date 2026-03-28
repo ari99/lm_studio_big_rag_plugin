@@ -68,6 +68,18 @@ async function main() {
         console.log(
           `[BigRAG CLI] Scanning: ${progress.currentFile || "discovering files"}`,
         );
+      } else if (progress.status === "parsing") {
+        console.log(
+          `[BigRAG CLI] Parsing: ${progress.phaseProgress}`,
+        );
+      } else if (progress.status === "chunking") {
+        console.log(
+          `[BigRAG CLI] Chunking: ${progress.phaseProgress}`,
+        );
+      } else if (progress.status === "embedding") {
+        console.log(
+          `[BigRAG CLI] Embedding: ${progress.phaseProgress}`,
+        );
       } else if (progress.status === "indexing") {
         const success = progress.successfulFiles ?? 0;
         const failed = progress.failedFiles ?? 0;

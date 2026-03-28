@@ -74,10 +74,14 @@ describe("Token Limit Enforcement", () => {
   it("should estimate tokens correctly", () => {
     const text = "This is a test sentence with some words.";
     const tokens = estimateTokenCount(text);
-    
-    // Should be approximately text.length / 4
-    const expected = Math.ceil(text.length / 4);
-    assert.strictEqual(tokens, expected);
+
+    // New estimation uses word-based calculation: ~1.3 tokens per word
+    // 9 words * 1.3 = ~11.7 → 12 tokens
+    // The estimate should be reasonable (between 8 and 15 for this text)
+    assert.ok(
+      tokens >= 8 && tokens <= 15,
+      `Token estimate ${tokens} should be reasonable for "${text}"`
+    );
   });
 
   it("should handle empty text", () => {

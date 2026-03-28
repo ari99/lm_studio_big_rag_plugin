@@ -19,6 +19,48 @@ export interface ChunkResult {
 }
 
 /**
+ * Maximum tokens allowed for embedding model input
+ * This is a hard limit - chunks exceeding this will be rejected
+ */
+export const MAX_EMBEDDING_TOKENS = 2048;
+
+/**
+ * Conservative token limit for chunking to ensure we stay under the embedding limit
+ * Uses a safety margin to account for tokenization variance
+ * Target: ~1800 tokens leaves ~248 token buffer for tokenization differences
+ */
+export const MAX_CHUNK_TOKENS = 1800;
+
+/**
+ * More accurate token estimation using multiple heuristics
+ * Accounts for different text types (code, technical text, prose)
+ */
+export function estimateTokenCount(text: string): number {
+  if (!text || text.length === 0) {
+    return 0;
+  }
+
+  // Base estimate: 1 token ≈ 4 characters for English prose
+  let estimate = text.length / 4;
+
+  // Adjust for common patterns that affect tokenization
+  // Code and technical text often have more tokens per character
+  const codePatternRatio = (text.match(/[{}[\]()=<>;&|]/g) || []).length / text.length;
+  if (codePatternRatio > 0.05) {
+    // Text has significant code-like content, use more conservative estimate
+    estimate = text.length / 3;
+  }
+
+  // Count actual words - helps with dense technical text
+  const wordCount = (text.match(/\b\w+\b/g) || []).length;
+  const avgTokensPerWord = 1.3; // Average English word is ~1.3 tokens
+  const wordBasedEstimate = wordCount * avgTokensPerWord;
+
+  // Use the higher of the two estimates for safety
+  return Math.ceil(Math.max(estimate, wordBasedEstimate));
+}
+
+/**
  * Optimized text chunker that splits text into overlapping chunks
  * Uses native Rust implementation when available for maximum performance
  */
@@ -59,7 +101,7 @@ export function chunkText(
       text: chunkText,
       startIndex: startIdx,
       endIndex: endIdx,
-      tokenEstimate: Math.ceil(chunkText.length / 4),
+      tokenEstimate: estimateTokenCount(chunkText),
     });
 
     // Move forward by (chunkSize - overlap) to create overlapping chunks
@@ -129,7 +171,7 @@ export async function chunkTextsBatch(
 ): Promise<Map<number, ChunkResult[]>> {
   if (isNativeAvailable() && nativeChunkTextsBatch) {
     const nativeResults = await nativeChunkTextsBatch(texts, chunkSize, overlap) as BatchChunkResult[];
-    
+
     // Group by file index
     const grouped = new Map<number, ChunkResult[]>();
     for (const result of nativeResults) {
@@ -154,27 +196,9 @@ export async function chunkTextsBatch(
 }
 
 /**
- * Estimate token count (rough approximation: 1 token ≈ 4 characters)
- */
-export function estimateTokenCount(text: string): number {
-  return Math.ceil(text.length / 4);
-}
-
-/**
- * Maximum tokens allowed for embedding model input
- * This is a hard limit enforced before sending to the embedding model
- */
-export const MAX_EMBEDDING_TOKENS = 2048;
-
-/**
- * Conservative token limit for chunking to ensure we stay under the embedding limit
- * Uses a safety margin to account for tokenization variance
- */
-export const MAX_CHUNK_TOKENS = 1800; // ~10% safety margin below 2048
-
-/**
  * Split a chunk that exceeds the maximum token limit into smaller sub-chunks
- * Uses binary search to find optimal split points at sentence boundaries
+ * Splits at sentence boundaries when possible, falls back to word boundaries
+ * Ensures each resulting chunk ends with proper sentence termination (EOS)
  */
 export function splitOversizedChunk(
   text: string,
@@ -197,54 +221,74 @@ export function splitOversizedChunk(
     ];
   }
 
-  // Need to split - find sentence boundaries for cleaner splits
-  const sentences = text.split(/(?<=[.!?])\s+/);
-  let currentChunk = "";
-  let currentStart = startIndex;
-  let sentenceStartIndex = startIndex;
+  // Split at sentence boundaries (., !, ?)
+  const sentenceRegex = /(?<=[.!?])\s+/g;
+  const sentences: string[] = [];
+  let lastIndex = 0;
 
-  for (let i = 0; i < sentences.length; i++) {
-    const sentence = sentences[i];
-    const testChunk = currentChunk ? `${currentChunk} ${sentence}` : sentence;
+  for (const match of text.matchAll(sentenceRegex)) {
+    const sentenceEnd = match.index! + match[0].length;
+    sentences.push(text.slice(lastIndex, sentenceEnd).trim());
+    lastIndex = sentenceEnd;
+  }
+  // Add remaining text as last sentence
+  if (lastIndex < text.length) {
+    const remaining = text.slice(lastIndex).trim();
+    if (remaining) {
+      sentences.push(remaining);
+    }
+  }
+
+  // If no sentence boundaries found, treat whole text as one sentence
+  if (sentences.length === 0) {
+    sentences.push(text.trim());
+  }
+
+  // Build chunks from sentences
+  let currentChunkText = "";
+  let currentChunkStart = startIndex;
+  let byteOffset = startIndex;
+
+  for (const sentence of sentences) {
+    const testChunk = currentChunkText ? `${currentChunkText} ${sentence}` : sentence;
     const testTokens = estimateTokenCount(testChunk);
 
     if (testTokens <= maxTokens) {
       // Can add this sentence to current chunk
-      currentChunk = testChunk;
+      currentChunkText = testChunk;
     } else {
       // Need to start a new chunk
-      if (currentChunk) {
+      if (currentChunkText) {
         result.push({
-          text: currentChunk,
-          startIndex: currentStart,
-          endIndex: sentenceStartIndex,
-          tokenEstimate: estimateTokenCount(currentChunk),
+          text: currentChunkText,
+          startIndex: currentChunkStart,
+          endIndex: currentChunkStart + currentChunkText.length,
+          tokenEstimate: estimateTokenCount(currentChunkText),
         });
       }
 
-      // Start new chunk with current sentence
-      // If single sentence is too long, split it by length
+      // Handle sentence that's too long on its own
       if (estimateTokenCount(sentence) > maxTokens) {
-        const subChunks = splitLongSentence(sentence, sentenceStartIndex, maxTokens);
+        const subChunks = splitLongSentence(sentence, byteOffset, maxTokens);
         result.push(...subChunks);
-        currentChunk = "";
-        currentStart = sentenceStartIndex + sentence.length;
+        currentChunkText = "";
+        currentChunkStart = byteOffset + sentence.length;
       } else {
-        currentChunk = sentence;
-        currentStart = sentenceStartIndex;
+        currentChunkText = sentence;
+        currentChunkStart = byteOffset;
       }
     }
 
-    sentenceStartIndex += sentence.length + 1; // +1 for space
+    byteOffset += sentence.length + 1; // +1 for space
   }
 
   // Don't forget the last chunk
-  if (currentChunk) {
+  if (currentChunkText) {
     result.push({
-      text: currentChunk,
-      startIndex: currentStart,
-      endIndex,
-      tokenEstimate: estimateTokenCount(currentChunk),
+      text: currentChunkText,
+      startIndex: currentChunkStart,
+      endIndex: currentChunkStart + currentChunkText.length,
+      tokenEstimate: estimateTokenCount(currentChunkText),
     });
   }
 
@@ -252,8 +296,8 @@ export function splitOversizedChunk(
 }
 
 /**
- * Split a very long sentence into smaller pieces by character count
- * Falls back to word-based splitting if sentence boundaries don't exist
+ * Split a very long sentence that exceeds the token limit
+ * Tries clause boundaries (commas, semicolons) first, then falls back to word boundaries
  */
 function splitLongSentence(
   sentence: string,
@@ -261,74 +305,93 @@ function splitLongSentence(
   maxTokens: number,
 ): ChunkResult[] {
   const result: ChunkResult[] = [];
-  const maxChars = maxTokens * 4; // Convert tokens to chars
 
-  // Try splitting at comma or semicolon first
-  const clauseSplit = sentence.split(/(?<=[,;])\s+/);
-  if (clauseSplit.length > 1) {
-    let currentChunk = "";
-    let currentStart = startIndex;
+  // Try splitting at clause boundaries (commas, semicolons)
+  const clauseRegex = /(?<=[,;])\s+/g;
+  const clauses: string[] = [];
+  let lastIndex = 0;
 
-    for (const clause of clauseSplit) {
-      const testChunk = currentChunk ? `${currentChunk} ${clause}` : clause;
+  for (const match of sentence.matchAll(clauseRegex)) {
+    const clauseEnd = match.index! + match[0].length;
+    clauses.push(sentence.slice(lastIndex, clauseEnd).trim());
+    lastIndex = clauseEnd;
+  }
+  // Add remaining text as last clause
+  if (lastIndex < sentence.length) {
+    const remaining = sentence.slice(lastIndex).trim();
+    if (remaining) {
+      clauses.push(remaining);
+    }
+  }
+
+  // If clause splitting produced multiple parts, use them
+  if (clauses.length > 1) {
+    let currentChunkText = "";
+    let currentChunkStart = startIndex;
+    let byteOffset = startIndex;
+
+    for (const clause of clauses) {
+      const testChunk = currentChunkText ? `${currentChunkText} ${clause}` : clause;
       if (estimateTokenCount(testChunk) <= maxTokens) {
-        currentChunk = testChunk;
+        currentChunkText = testChunk;
       } else {
-        if (currentChunk) {
+        if (currentChunkText) {
           result.push({
-            text: currentChunk,
-            startIndex: currentStart,
-            endIndex: currentStart + currentChunk.length,
-            tokenEstimate: estimateTokenCount(currentChunk),
+            text: currentChunkText,
+            startIndex: currentChunkStart,
+            endIndex: currentChunkStart + currentChunkText.length,
+            tokenEstimate: estimateTokenCount(currentChunkText),
           });
         }
-        currentChunk = clause;
-        currentStart = startIndex + sentence.indexOf(clause);
+        currentChunkText = clause;
+        currentChunkStart = byteOffset;
       }
+      byteOffset += clause.length + 1;
     }
 
-    if (currentChunk) {
+    if (currentChunkText) {
       result.push({
-        text: currentChunk,
-        startIndex: currentStart,
-        endIndex: startIndex + sentence.length,
-        tokenEstimate: estimateTokenCount(currentChunk),
+        text: currentChunkText,
+        startIndex: currentChunkStart,
+        endIndex: currentChunkStart + currentChunkText.length,
+        tokenEstimate: estimateTokenCount(currentChunkText),
       });
     }
 
     return result;
   }
 
-  // No good split points - split by fixed character count at word boundaries
+  // No clause boundaries - split by word boundaries
   const words = sentence.split(/\s+/);
-  let currentChunk = "";
-  let wordCount = 0;
+  let currentChunkText = "";
+  let currentChunkStart = startIndex;
+  let byteOffset = startIndex;
 
   for (const word of words) {
-    const testChunk = currentChunk ? `${currentChunk} ${word}` : word;
+    const testChunk = currentChunkText ? `${currentChunkText} ${word}` : word;
     if (estimateTokenCount(testChunk) <= maxTokens) {
-      currentChunk = testChunk;
-      wordCount++;
+      currentChunkText = testChunk;
     } else {
-      if (currentChunk) {
+      if (currentChunkText) {
         result.push({
-          text: currentChunk,
-          startIndex,
-          endIndex: startIndex + currentChunk.length,
-          tokenEstimate: estimateTokenCount(currentChunk),
+          text: currentChunkText,
+          startIndex: currentChunkStart,
+          endIndex: currentChunkStart + currentChunkText.length,
+          tokenEstimate: estimateTokenCount(currentChunkText),
         });
       }
-      currentChunk = word;
-      wordCount = 1;
+      currentChunkText = word;
+      currentChunkStart = byteOffset;
     }
+    byteOffset += word.length + 1;
   }
 
-  if (currentChunk) {
+  if (currentChunkText) {
     result.push({
-      text: currentChunk,
-      startIndex: startIndex + sentence.length - currentChunk.length,
-      endIndex: startIndex + sentence.length,
-      tokenEstimate: estimateTokenCount(currentChunk),
+      text: currentChunkText,
+      startIndex: currentChunkStart,
+      endIndex: currentChunkStart + currentChunkText.length,
+      tokenEstimate: estimateTokenCount(currentChunkText),
     });
   }
 
@@ -337,7 +400,7 @@ function splitLongSentence(
 
 /**
  * Ensure all chunks are within the maximum token limit for embedding
- * Splits any oversized chunks into smaller pieces
+ * Splits any oversized chunks into smaller pieces at sentence boundaries
  */
 export function ensureChunkTokenLimits(
   chunks: ChunkResult[],
@@ -351,6 +414,37 @@ export function ensureChunkTokenLimits(
   }
 
   return result;
+}
+
+/**
+ * Validate that a chunk's text is within the embedding token limit
+ * Returns true if the chunk is safe to embed
+ */
+export function validateChunkForEmbedding(chunk: ChunkResult, maxTokens: number = MAX_EMBEDDING_TOKENS): boolean {
+  return estimateTokenCount(chunk.text) <= maxTokens;
+}
+
+/**
+ * Filter and log chunks that exceed the embedding token limit
+ * Returns only chunks that are safe to embed
+ */
+export function filterOversizedChunks(
+  chunks: ChunkResult[],
+  maxTokens: number = MAX_EMBEDDING_TOKENS,
+  logWarnings: boolean = true,
+): ChunkResult[] {
+  return chunks.filter((chunk, idx) => {
+    const tokens = estimateTokenCount(chunk.text);
+    if (tokens > maxTokens) {
+      if (logWarnings) {
+        console.warn(
+          `Chunk ${idx} exceeds token limit: ${tokens} tokens (max: ${maxTokens}). Skipping.`,
+        );
+      }
+      return false;
+    }
+    return true;
+  });
 }
 
 /**
