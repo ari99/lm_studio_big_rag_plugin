@@ -48,8 +48,8 @@ export async function runIndexingJob({
   forceReindex = false,
   vectorStore: existingVectorStore,
   onProgress,
-  embeddingBatchSize = 100,
-  embeddingConcurrency = 5,
+  embeddingBatchSize = 250,
+  embeddingConcurrency = 20,
 }: RunIndexingParams): Promise<RunIndexingResult> {
   const vectorStore = existingVectorStore ?? new VectorStore(vectorStoreDir);
   const ownsVectorStore = existingVectorStore === undefined;
@@ -101,9 +101,11 @@ export async function runIndexingJob({
         throw new Error('Could not load any embedding model. Please download one first (e.g., nomic-ai/nomic-embed-text-v1.5). Run: lms get nomic-ai/nomic-embed-text-v1.5');
       }
       
-      // Load remaining instances (first one is already loaded)
-      embeddingModels.push(loadedModels[0] || await client.embedding.model(baseModelId));
+      // Get handle to the first loaded model
+      const firstModel = await client.embedding.model(baseModelId);
+      embeddingModels.push(firstModel);
       
+      // Load remaining instances (we already have 1, need EMBEDDING_MODEL_COUNT - 1 more)
       for (let i = 1; i < EMBEDDING_MODEL_COUNT; i++) {
         try {
           // Load additional instances with unique identifiers
@@ -114,9 +116,7 @@ export async function runIndexingJob({
         } catch (e: any) {
           // Instance might already exist, get handle to it
           if (e.message?.includes('already exists')) {
-            const model = await client.embedding.model(baseModelId);
-            embeddingModels.push(model);
-            console.log(`[BigRAG] Using existing embedding model instance ${i + 1}/${EMBEDDING_MODEL_COUNT}`);
+            console.warn(`[BigRAG] Instance ${i + 1} already exists with identifier 'embedding-instance-${i + 1}', skipping...`);
           } else {
             console.warn(`[BigRAG] Failed to load instance ${i + 1}: ${e.message}`);
           }

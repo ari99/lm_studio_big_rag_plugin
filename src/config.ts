@@ -160,10 +160,10 @@ export const configSchematics = createConfigSchematics()
       min: 10,
       max: 500,
       displayName: "Embedding Batch Size",
-      subtitle: "Number of chunks per embedding API call. Larger = more efficient but uses more memory. Default: 100. Increase to 200-500 for faster embedding.",
+      subtitle: "Number of chunks per embedding API call. Default: 250 chunks per model. Larger = more efficient but uses more memory.",
       slider: { min: 10, max: 500, step: 10 },
     },
-    100,
+    250,
   )
   .field(
     "embeddingParallelization.concurrency",
@@ -171,12 +171,12 @@ export const configSchematics = createConfigSchematics()
     {
       int: true,
       min: 1,
-      max: 20,
+      max: 50,
       displayName: "Embedding Concurrency",
-      subtitle: "Number of simultaneous embedding requests. Higher = faster but more network/memory pressure. Default: 5. Increase to 10-20 for faster embedding.",
-      slider: { min: 1, max: 20, step: 1 },
+      subtitle: "Number of simultaneous embedding requests. Default: 20. Higher = faster but more network/memory pressure.",
+      slider: { min: 1, max: 50, step: 1 },
     },
-    5,
+    20,
   )
   .build();
 
