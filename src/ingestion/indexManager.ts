@@ -5,6 +5,7 @@ import { scanDirectory, type ScannedFile } from "./fileScanner";
 import { parseDocument, type ParseFailureReason } from "../parsers/documentParser";
 import { VectorStore, type DocumentChunk } from "../vectorstore/vectorStore";
 import { chunkTextsBatch, type ChunkResult, ensureChunkTokenLimits, estimateTokenCount, MAX_EMBEDDING_TOKENS } from "../utils/textChunker";
+import { chunkTextsByTokens as chunkTextsByTokensNative, countTokens, validateTokenLimit, MAX_CHUNK_TOKENS as TOKENIZER_MAX_CHUNK_TOKENS } from "../utils/tokenAwareChunker";
 import { calculateFileHash } from "../utils/fileHash";
 import { type EmbeddingDynamicHandle, type LMStudioClient } from "@lmstudio/sdk";
 import { FailedFileRegistry } from "../utils/failedFileRegistry";
@@ -268,20 +269,27 @@ export class IndexManager {
 
       if (textsToChunk.length > 0) {
         console.log(`Batch chunking ${textsToChunk.length} documents...`);
-        
+
         if (onProgress) {
           onProgress({
             totalFiles: textsToChunk.length,
             processedFiles: 0,
-            currentFile: "Chunking texts (Rust native)...",
+            currentFile: "Chunking texts (Rust native - token-based)...",
             status: "chunking",
             phase: "Text Chunking",
             phaseProgress: `Chunking ${textsToChunk.length} documents`,
           });
         }
+
+        // Use tokenizer-based chunking for accurate token boundaries
+        // This ensures no chunk exceeds the embedding model's context length
+        const chunkedArrays = await chunkTextsByTokensNative(textsToChunk, TOKENIZER_MAX_CHUNK_TOKENS, chunkOverlap);
         
-        chunkedTexts = await chunkTextsBatch(textsToChunk, chunkSize, chunkOverlap);
-        
+        // Convert array of arrays to Map
+        chunkedArrays.forEach((chunks, index) => {
+          chunkedTexts.set(index, chunks);
+        });
+
         if (onProgress) {
           let totalChunks = 0;
           for (const [, chunks] of chunkedTexts.entries()) {
@@ -290,7 +298,7 @@ export class IndexManager {
           onProgress({
             totalFiles: textsToChunk.length,
             processedFiles: textsToChunk.length,
-            currentFile: `Created ${totalChunks} chunks`,
+            currentFile: `Created ${totalChunks} chunks (token-accurate)`,
             status: "chunking",
             phase: "Text Chunking",
             phaseProgress: "Complete",
@@ -374,13 +382,15 @@ export class IndexManager {
 
       if (allChunks.length > 0) {
         try {
-          // SAFETY CHECK: Filter out any chunks that still exceed the embedding token limit
-          // This is a last line of defense before sending to the embedding model
+          // With tokenizer-based chunking, all chunks should already be within limits
+          // This is a final safety validation using the native tokenizer
           const safeChunks = allChunks.filter((chunk, idx) => {
-            const tokens = estimateTokenCount(chunk.text);
-            if (tokens > MAX_EMBEDDING_TOKENS) {
+            // Use native tokenizer for accurate validation
+            const isValid = validateTokenLimit(chunk.text, MAX_EMBEDDING_TOKENS);
+            if (!isValid) {
+              const actualTokens = countTokens(chunk.text);
               console.warn(
-                `Skipping chunk ${idx} from ${chunk.doc.file.name}: ${tokens} tokens exceeds limit of ${MAX_EMBEDDING_TOKENS}`,
+                `Skipping chunk ${idx} from ${chunk.doc.file.name}: ${actualTokens} tokens exceeds limit of ${MAX_EMBEDDING_TOKENS}`,
               );
               return false;
             }
@@ -393,13 +403,13 @@ export class IndexManager {
             );
           }
 
-          // Log token statistics for debugging
-          const tokenStats = safeChunks.map(c => estimateTokenCount(c.text));
+          // Log token statistics using native tokenizer for accuracy
+          const tokenStats = safeChunks.map(c => c.chunk.tokenEstimate);
           const minTokens = Math.min(...tokenStats, 0);
           const maxTokens = Math.max(...tokenStats, 0);
           const avgTokens = tokenStats.length > 0 ? Math.round(tokenStats.reduce((a, b) => a + b, 0) / tokenStats.length) : 0;
           console.log(
-            `[Token Stats] Chunks: ${safeChunks.length}, Min: ${minTokens}, Max: ${maxTokens}, Avg: ${avgTokens} tokens`,
+            `[Token Stats] Chunks: ${safeChunks.length}, Min: ${minTokens}, Max: ${maxTokens}, Avg: ${avgTokens} tokens (native cl100k_base)`,
           );
 
           // Append newline to each chunk to satisfy embedding model's EOS token expectation

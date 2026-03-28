@@ -374,13 +374,14 @@ async function generateDataset(count: number, outputDir: string): Promise<void> 
   }
   
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-  
+  const elapsedSec = parseFloat(elapsed);
+
   // Print statistics
   console.log('\n=== Dataset Generation Complete ===');
   console.log(`Total files: ${stats.totalFiles}`);
   console.log(`Total words: ${stats.totalWords.toLocaleString()}`);
   console.log(`Time elapsed: ${elapsed}s`);
-  console.log(`Files per second: ${(stats.totalFiles / (elapsed / 1000)).toFixed(1)}`);
+  console.log(`Files per second: ${(stats.totalFiles / elapsedSec).toFixed(1)}`);
   console.log('\nBy extension:');
   for (const [ext, count] of stats.byExtension.entries()) {
     console.log(`  .${ext}: ${count} (${((count / stats.totalFiles) * 100).toFixed(1)}%)`);

@@ -18,6 +18,9 @@ memmap2 = "0.9"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
+# Tokenizer for accurate token counting (cl100k_base for nomic-embed-text-v1.5)
+tiktoken-rs = "0.6"
+
 [build-dependencies]
 napi-build = "2.1"
 

@@ -65,6 +65,25 @@ export interface ScannedFile {
   mtime: number;
 }
 
+// Tokenizer type definitions
+export interface TokenChunk {
+  text: string;
+  token_count: number;
+  start_token: number;
+  end_token: number;
+}
+
+export interface TokenCountResult {
+  text: string;
+  token_count: number;
+}
+
+export interface TokenStats {
+  token_count: number;
+  char_count: number;
+  tokens_per_char: number;
+}
+
 // Fallback implementations
 const fallbacks = {
   hashFile: async (path: string): Promise<string> => {
@@ -159,6 +178,15 @@ export const scanDirectory = nativeModule?.scanDirectory || fallbacks.scanDirect
 export const isSupportedExtension = nativeModule?.isSupportedExtension || (() => true);
 export const getSupportedExtensions = nativeModule?.getSupportedExtensions;
 export const DirectoryScanner = nativeModule?.DirectoryScanner;
+
+// Tokenizer functions (from Rust native module)
+export const countTokens = nativeModule?.countTokens;
+export const countTokensBatch = nativeModule?.countTokensBatch;
+export const validateTokenLimit = nativeModule?.validateTokenLimit;
+export const chunkByTokens = nativeModule?.chunkByTokens;
+export const chunkTextsByTokens = nativeModule?.chunkTextsByTokens;
+export const getTokenStats = nativeModule?.getTokenStats;
+export const filterByTokenLimit = nativeModule?.filterByTokenLimit;
 
 // Utility functions
 export function isNativeAvailable(): boolean {
