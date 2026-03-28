@@ -23,7 +23,8 @@
     "bench:hash": "npm run build && node --loader ts-node/esm benchmarks/hashBench.ts",
     "bench:chunk": "npm run build && node --loader ts-node/esm benchmarks/chunkBench.ts",
     "bench:scan": "npm run build && node --loader ts-node/esm benchmarks/scanBench.ts",
-    "bench:real": "npm run build && node dist/benchmarks/realWorldBench.js"
+    "bench:real": "npm run build && node dist/benchmarks/realWorldBench.js",
+    "bench:embedding": "npm run build && npx ts-node benchmarks/embeddingBenchmark.ts"
   },
   "author": "",
   "license": "ISC",
