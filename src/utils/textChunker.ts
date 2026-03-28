@@ -26,14 +26,16 @@ export const MAX_EMBEDDING_TOKENS = 2048;
 
 /**
  * Conservative token limit for chunking to ensure we stay under the embedding limit
- * Uses a safety margin to account for tokenization variance
- * Target: ~1800 tokens leaves ~248 token buffer for tokenization differences
+ * Uses a safety margin to account for tokenization variance and dense technical text
+ * Target: ~1500 tokens leaves ~548 token buffer for tokenization differences
+ * This prevents warnings when embedding model receives chunks exceeding context length
  */
-export const MAX_CHUNK_TOKENS = 1800;
+export const MAX_CHUNK_TOKENS = 1500;
 
 /**
  * More accurate token estimation using multiple heuristics
  * Accounts for different text types (code, technical text, prose)
+ * Uses conservative estimates to avoid exceeding embedding model limits
  */
 export function estimateTokenCount(text: string): number {
   if (!text || text.length === 0) {
@@ -57,7 +59,18 @@ export function estimateTokenCount(text: string): number {
   const wordBasedEstimate = wordCount * avgTokensPerWord;
 
   // Use the higher of the two estimates for safety
-  return Math.ceil(Math.max(estimate, wordBasedEstimate));
+  let tokenEstimate = Math.ceil(Math.max(estimate, wordBasedEstimate));
+
+  // Apply additional safety margin for dense technical content
+  // URLs, long identifiers, and special characters increase token count
+  const hasLongTokens = /\b\w{15,}\b/.test(text);
+  const hasSpecialChars = /[@#$%^&*\\\/_\-+=~`|]/.test(text);
+  if (hasLongTokens || hasSpecialChars) {
+    // Add 10% buffer for texts with potential long/special tokens
+    tokenEstimate = Math.ceil(tokenEstimate * 1.1);
+  }
+
+  return tokenEstimate;
 }
 
 /**

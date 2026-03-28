@@ -402,7 +402,9 @@ export class IndexManager {
             `[Token Stats] Chunks: ${safeChunks.length}, Min: ${minTokens}, Max: ${maxTokens}, Avg: ${avgTokens} tokens`,
           );
 
-          const allTexts = safeChunks.map(c => c.text);
+          // Append newline to each chunk to satisfy embedding model's EOS token expectation
+          // This mitigates the warning: "At least one last token in strings embedded is not SEP"
+          const allTexts = safeChunks.map(c => c.text + '\n');
           const allEmbeddings: any[] = [];
 
           // Embed in batches to avoid timeout and improve reliability
