@@ -113,15 +113,18 @@ export async function runIndexingJob({
         throw new Error('Could not load any embedding model. Please download one first (e.g., nomic-ai/nomic-embed-text-v1.5). Run: lms get nomic-ai/nomic-embed-text-v1.5');
       }
 
+      // Sync our array with actually loaded models
+      const freshlyLoadedModels = await client.embedding.listLoaded();
+      embeddingModels.length = 0; // Clear our array
+      embeddingModels.push(...freshlyLoadedModels);
+      console.log(`[BigRAG] Synced with LM Studio: now have ${embeddingModels.length} loaded model(s)`);
+
       // Load additional instances until we have exactly EMBEDDING_MODEL_COUNT
       let instanceNum = embeddingModels.length + 1;
+      
       while (embeddingModels.length < EMBEDDING_MODEL_COUNT) {
         const instanceId = `embedding-instance-${instanceNum}`;
         try {
-          // Check current state before loading
-          const currentModels = await client.embedding.listLoaded();
-          console.log(`[BigRAG] Current loaded models: ${currentModels.length}, Target: ${EMBEDDING_MODEL_COUNT}, Need to load: ${EMBEDDING_MODEL_COUNT - embeddingModels.length}`);
-
           // Try to load with unique identifier
           const model = await client.embedding.load(baseModelId, { identifier: instanceId });
           embeddingModels.push(model);
