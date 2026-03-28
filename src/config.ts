@@ -153,16 +153,6 @@ export const configSchematics = createConfigSchematics()
     DEFAULT_PROMPT_TEMPLATE,
   )
   .field(
-    "embeddingParallelization.mode",
-    "string",
-    {
-      displayName: "Embedding Parallelization",
-      subtitle: "Speed up embedding by using multiple models or larger batches. 'multi-model' loads multiple model instances, 'large-batch' uses bigger batches with one model.",
-      placeholder: "single (multi-model for advanced users)",
-    },
-    "single",
-  )
-  .field(
     "embeddingParallelization.modelCount",
     "numeric",
     {
@@ -170,16 +160,10 @@ export const configSchematics = createConfigSchematics()
       min: 1,
       max: 8,
       displayName: "Number of Embedding Models",
-      subtitle: "How many instances of the embedding model to load. More = faster but uses more VRAM. Only used in 'multi-model' mode.",
+      subtitle: "How many instances of the embedding model to load. 1 = single model, 2-8 = multi-model parallelization. More = faster but uses more VRAM (each instance uses ~300MB).",
       slider: { min: 1, max: 8, step: 1 },
-      dependencies: [
-        {
-          key: "embeddingParallelization.mode",
-          condition: { type: "equals", value: "multi-model" },
-        },
-      ],
     },
-    2,
+    1,
   )
   .field(
     "embeddingParallelization.batchSize",
@@ -189,7 +173,7 @@ export const configSchematics = createConfigSchematics()
       min: 10,
       max: 500,
       displayName: "Batch Size",
-      subtitle: "Number of chunks per embedding API call. Larger = more efficient but uses more memory. Used in all modes.",
+      subtitle: "Number of chunks per embedding API call. Larger = more efficient but uses more memory. Default: 100. For large-batch mode, use 300-500.",
       slider: { min: 10, max: 500, step: 10 },
     },
     100,
@@ -202,7 +186,7 @@ export const configSchematics = createConfigSchematics()
       min: 1,
       max: 20,
       displayName: "Concurrent Batches",
-      subtitle: "Number of simultaneous embedding requests. Higher = faster but more network/memory pressure.",
+      subtitle: "Number of simultaneous embedding requests. Higher = faster but more network/memory pressure. Default: 5.",
       slider: { min: 1, max: 20, step: 1 },
     },
     5,

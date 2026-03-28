@@ -17,7 +17,6 @@ export interface RunIndexingParams {
   vectorStore?: VectorStore;
   onProgress?: (progress: IndexingProgress) => void;
   // Embedding parallelization settings
-  embeddingMode?: "single" | "multi-model" | "large-batch";
   embeddingModelCount?: number;
   embeddingBatchSize?: number;
   embeddingConcurrency?: number;
@@ -50,7 +49,6 @@ export async function runIndexingJob({
   forceReindex = false,
   vectorStore: existingVectorStore,
   onProgress,
-  embeddingMode = "single",
   embeddingModelCount = 1,
   embeddingBatchSize = 100,
   embeddingConcurrency = 5,
@@ -62,16 +60,19 @@ export async function runIndexingJob({
     await vectorStore.initialize();
   }
 
-  // Load embedding model(s) based on parallelization mode
+  // Load embedding model(s) based on modelCount
+  // modelCount > 1 = multi-model mode, modelCount = 1 = single model mode
   const embeddingModelId = "nomic-ai/nomic-embed-text-v1.5-GGUF";
+  const isMultiModel = embeddingModelCount > 1;
 
   console.log(`[BigRAG] Loading embedding model(s): ${embeddingModelId}`);
-  console.log(`[BigRAG] Mode: ${embeddingMode}, Model count: ${embeddingModelCount}`);
+  console.log(`[BigRAG] Mode: ${isMultiModel ? `multi-model (${embeddingModelCount} instances)` : "single model"}`);
+  console.log(`[BigRAG] Batch size: ${embeddingBatchSize}, Concurrency: ${embeddingConcurrency}`);
 
   const embeddingModels: EmbeddingDynamicHandle[] = [];
 
   try {
-    if (embeddingMode === "multi-model" && embeddingModelCount > 1) {
+    if (isMultiModel) {
       // Load multiple model instances for parallel embedding
       console.log(`[BigRAG] Loading ${embeddingModelCount} model instances for multi-model parallelization...`);
       const loadPromises = Array.from({ length: embeddingModelCount }, async (_, i) => {
@@ -85,7 +86,7 @@ export async function runIndexingJob({
       embeddingModels.push(...loadedModels);
       console.log(`[BigRAG] All ${embeddingModelCount} model instances loaded successfully`);
     } else {
-      // Single model mode (default)
+      // Single model mode
       console.log('[BigRAG] Loading single embedding model...');
       const model = await client.embedding.model(embeddingModelId, { signal: abortSignal });
       embeddingModels.push(model);
