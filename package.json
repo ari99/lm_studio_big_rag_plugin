@@ -11,7 +11,7 @@
   "scripts": {
     "dev": "lms dev",
     "push": "lms push",
-    "build": "tsc",
+    "build": "tsc && node -e \"const fs=require('fs'); const path=require('path'); const src=path.join(__dirname,'native'); const dst=path.join(__dirname,'dist','native'); if(!fs.existsSync(dst)) fs.mkdirSync(dst,{recursive:true}); fs.readdirSync(src).filter(f=>f.endsWith('.node')).forEach(f=>fs.copyFileSync(path.join(src,f),path.join(dst,f))); console.log('Copied native modules to dist/native/')\"",
     "build:native": "cd native && npm run build",
     "build:all": "npm run build:native && npm run build",
     "test": "npm run build && node --test dist/tests/parseDocument.test.js",

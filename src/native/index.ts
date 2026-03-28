@@ -15,22 +15,31 @@ let nativeLoadError: string | null = null;
 
 try {
   // Try different possible paths for the native module
+  // Paths are relative to dist/native/index.js (compiled output)
   const paths = [
-    '../../native/bigrag-native.linux-x64-gnu.node',
-    '../../native/index.node',
-    '@bigrag/native',
+    '../native/bigrag-native.linux-x64-gnu.node',  // From dist/native/
+    '../../native/bigrag-native.linux-x64-gnu.node',  // From dist/
+    './bigrag-native.linux-x64-gnu.node',  // Same directory
+    '@bigrag/native',  // NPM package (if installed)
   ];
 
   for (const p of paths) {
     try {
       nativeModule = require(p);
+      console.log('[BigRAG Native] Loaded from:', p);
       break;
-    } catch {
-      continue;
+    } catch (e) {
+      // Silently try next path
     }
+  }
+  
+  if (!nativeModule) {
+    nativeLoadError = 'Native module not found at any of the expected paths';
+    console.warn('[BigRAG Native] Using TypeScript fallbacks. Native functions will not be available.');
   }
 } catch (e) {
   nativeLoadError = (e as Error).message;
+  console.warn('[BigRAG Native] Error loading native module:', nativeLoadError);
 }
 
 // Type definitions (napi-rs converts snake_case to camelCase for JS)
@@ -179,14 +188,79 @@ export const isSupportedExtension = nativeModule?.isSupportedExtension || (() =>
 export const getSupportedExtensions = nativeModule?.getSupportedExtensions;
 export const DirectoryScanner = nativeModule?.DirectoryScanner;
 
-// Tokenizer functions (from Rust native module)
-export const countTokens = nativeModule?.countTokens;
-export const countTokensBatch = nativeModule?.countTokensBatch;
-export const validateTokenLimit = nativeModule?.validateTokenLimit;
-export const chunkByTokens = nativeModule?.chunkByTokens;
-export const chunkTextsByTokens = nativeModule?.chunkTextsByTokens;
-export const getTokenStats = nativeModule?.getTokenStats;
-export const filterByTokenLimit = nativeModule?.filterByTokenLimit;
+// Tokenizer functions (from Rust native module, with TS fallbacks)
+const tokenizerFallbacks = {
+  countTokens: (text: string): number => {
+    // Heuristic fallback: ~1 token per 4 characters
+    return Math.ceil(text.length / 4);
+  },
+  
+  validateTokenLimit: (text: string, maxTokens?: number): boolean => {
+    const max = maxTokens || 2048;
+    return tokenizerFallbacks.countTokens(text) <= max;
+  },
+  
+  chunkByTokens: (text: string, maxTokens: number, overlap: number): TokenChunk[] => {
+    // Fallback: estimate words and chunk
+    const words = text.split(/\s+/);
+    const wordsPerToken = 0.75; // Approximate
+    const maxWords = Math.floor(maxTokens / wordsPerToken);
+    
+    const chunks: TokenChunk[] = [];
+    let startIdx = 0;
+    
+    while (startIdx < words.length) {
+      const endIdx = Math.min(startIdx + maxWords, words.length);
+      const chunkWords = words.slice(startIdx, endIdx);
+      const chunkText = chunkWords.join(' ');
+      
+      chunks.push({
+        text: chunkText,
+        token_count: tokenizerFallbacks.countTokens(chunkText),
+        start_token: startIdx,
+        end_token: endIdx,
+      });
+      
+      const step = Math.max(1, maxWords - Math.floor(overlap / wordsPerToken));
+      startIdx += step;
+      if (endIdx >= words.length) break;
+    }
+    
+    return chunks;
+  },
+  
+  chunkTextsByTokens: (texts: string[], maxTokens: number, overlap: number): TokenChunk[][] => {
+    return texts.map(text => tokenizerFallbacks.chunkByTokens(text, maxTokens, overlap));
+  },
+  
+  countTokensBatch: (texts: string[]): TokenCountResult[] => {
+    return texts.map(text => ({
+      text,
+      token_count: tokenizerFallbacks.countTokens(text),
+    }));
+  },
+  
+  getTokenStats: (text: string): TokenStats => {
+    const tokenCount = tokenizerFallbacks.countTokens(text);
+    return {
+      token_count: tokenCount,
+      char_count: text.length,
+      tokens_per_char: text.length > 0 ? tokenCount / text.length : 0,
+    };
+  },
+  
+  filterByTokenLimit: (texts: string[], maxTokens: number): string[] => {
+    return texts.filter(text => tokenizerFallbacks.validateTokenLimit(text, maxTokens));
+  },
+};
+
+export const countTokens = nativeModule?.countTokens || tokenizerFallbacks.countTokens;
+export const countTokensBatch = nativeModule?.countTokensBatch || tokenizerFallbacks.countTokensBatch;
+export const validateTokenLimit = nativeModule?.validateTokenLimit || tokenizerFallbacks.validateTokenLimit;
+export const chunkByTokens = nativeModule?.chunkByTokens || tokenizerFallbacks.chunkByTokens;
+export const chunkTextsByTokens = nativeModule?.chunkTextsByTokens || tokenizerFallbacks.chunkTextsByTokens;
+export const getTokenStats = nativeModule?.getTokenStats || tokenizerFallbacks.getTokenStats;
+export const filterByTokenLimit = nativeModule?.filterByTokenLimit || tokenizerFallbacks.filterByTokenLimit;
 
 // Utility functions
 export function isNativeAvailable(): boolean {
