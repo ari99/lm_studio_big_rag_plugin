@@ -58,21 +58,25 @@ export async function runIndexingJob({
     await vectorStore.initialize();
   }
 
-  // Auto-detect and load the first available embedding model
+  // Auto-detect and load embedding model(s)
+  // Load 4 instances by default for parallel embedding processing
   console.log('[BigRAG] Searching for available embedding models...');
   
-  let embeddingModel: EmbeddingDynamicHandle | undefined;
+  const EMBEDDING_MODEL_COUNT = 4; // Default: load 4 instances for parallel processing
+  const embeddingModels: EmbeddingDynamicHandle[] = [];
+  
   try {
     // First check if any embedding models are already loaded
     let loadedModels = await client.embedding.listLoaded();
     
-    if (loadedModels.length > 0) {
-      // Use the first loaded model
-      embeddingModel = loadedModels[0];
-      console.log('[BigRAG] Using already loaded embedding model');
+    if (loadedModels.length >= EMBEDDING_MODEL_COUNT) {
+      // Use the first N loaded models
+      embeddingModels.push(...loadedModels.slice(0, EMBEDDING_MODEL_COUNT));
+      console.log(`[BigRAG] Using ${embeddingModels.length} already loaded embedding models`);
     } else {
-      // No models loaded, try to load the first downloaded model
-      console.log('[BigRAG] No embedding models loaded. Attempting to load first available model...');
+      // Need to load models
+      console.log(`[BigRAG] Loading ${EMBEDDING_MODEL_COUNT} embedding model instances for parallel processing...`);
+      
       // Try common model IDs
       const commonModelIds = [
         'nomic-ai/nomic-embed-text-v1.5',
@@ -80,20 +84,46 @@ export async function runIndexingJob({
         'text-embedding-nomic-embed-text-v1.5',
       ];
       
+      let baseModelId: string | null = null;
       for (const modelId of commonModelIds) {
         try {
-          // Use .load() to explicitly load the model (not just get a handle)
-          embeddingModel = await client.embedding.load(modelId);
-          console.log(`[BigRAG] Loaded embedding model: ${modelId}`);
+          // Try to load the first instance to find a working model ID
+          await client.embedding.load(modelId);
+          baseModelId = modelId;
+          console.log(`[BigRAG] Found working model ID: ${modelId}`);
           break;
         } catch (e) {
           // Try next model ID
         }
       }
       
-      if (!embeddingModel) {
+      if (!baseModelId) {
         throw new Error('Could not load any embedding model. Please download one first (e.g., nomic-ai/nomic-embed-text-v1.5). Run: lms get nomic-ai/nomic-embed-text-v1.5');
       }
+      
+      // Load remaining instances (first one is already loaded)
+      embeddingModels.push(loadedModels[0] || await client.embedding.model(baseModelId));
+      
+      for (let i = 1; i < EMBEDDING_MODEL_COUNT; i++) {
+        try {
+          // Load additional instances with unique identifiers
+          const instanceId = `embedding-instance-${i + 1}`;
+          const model = await client.embedding.load(baseModelId, { identifier: instanceId });
+          embeddingModels.push(model);
+          console.log(`[BigRAG] Loaded embedding model instance ${i + 1}/${EMBEDDING_MODEL_COUNT}: ${instanceId}`);
+        } catch (e: any) {
+          // Instance might already exist, get handle to it
+          if (e.message?.includes('already exists')) {
+            const model = await client.embedding.model(baseModelId);
+            embeddingModels.push(model);
+            console.log(`[BigRAG] Using existing embedding model instance ${i + 1}/${EMBEDDING_MODEL_COUNT}`);
+          } else {
+            console.warn(`[BigRAG] Failed to load instance ${i + 1}: ${e.message}`);
+          }
+        }
+      }
+      
+      console.log(`[BigRAG] Successfully loaded ${embeddingModels.length} embedding model instances`);
     }
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
@@ -105,7 +135,7 @@ export async function runIndexingJob({
     throw new Error(`Failed to load embedding model: ${errorMsg}`);
   }
 
-  const embeddingModels = [embeddingModel];
+  console.log(`[BigRAG] Using ${embeddingModels.length} embedding model(s) for parallel processing`);
 
   const indexManager = new IndexManager({
     documentsDir,
