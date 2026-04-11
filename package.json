@@ -44,6 +44,7 @@
     "typescript": "^5.9.3"
   },
   "overrides": {
-    "@napi-rs/canvas": "file:stubs/napi-rs-canvas"
+    "@napi-rs/canvas": "file:stubs/napi-rs-canvas",
+    "whatwg-url": "^14.2.0"
   }
 }

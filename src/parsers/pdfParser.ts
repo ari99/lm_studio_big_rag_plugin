@@ -386,50 +386,25 @@ async function resolveImageData(
     return cache.get(objId)!;
   }
 
+  // Avoid PDF.js PDFObjects.get(id, callback): it does obj.promise.then(() => cb(...))
+  // without .catch(), so a rejected or throwing callback becomes an unhandled rejection
+  // (e.g. FormatError from malformed PDF streams).
   const promise = (async () => {
-    try {
-      if (typeof page.objs.has === "function" && page.objs.has(objId)) {
-        return page.objs.get(objId);
+    const deadline = Date.now() + OCR_IMAGE_TIMEOUT_MS;
+    const pollMs = 25;
+
+    while (Date.now() < deadline) {
+      try {
+        if (typeof page.objs.has === "function" && page.objs.has(objId)) {
+          return page.objs.get(objId);
+        }
+      } catch {
+        // Transient; keep polling until timeout.
       }
-    } catch {
-      // fall through to async path
+      await new Promise((r) => setTimeout(r, pollMs));
     }
 
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      let timeoutHandle: NodeJS.Timeout | null = null;
-
-      const cleanup = () => {
-        if (timeoutHandle) {
-          clearTimeout(timeoutHandle);
-          timeoutHandle = null;
-        }
-      };
-
-      const handleData = (data: any) => {
-        settled = true;
-        cleanup();
-        resolve(data);
-      };
-
-      try {
-        page.objs.get(objId, handleData);
-      } catch (error) {
-        settled = true;
-        cleanup();
-        reject(error);
-        return;
-      }
-
-      if (Number.isFinite(OCR_IMAGE_TIMEOUT_MS) && OCR_IMAGE_TIMEOUT_MS > 0) {
-        timeoutHandle = setTimeout(() => {
-          if (!settled) {
-            settled = true;
-            reject(new ImageDataTimeoutError(objId));
-          }
-        }, OCR_IMAGE_TIMEOUT_MS);
-      }
-    });
+    throw new ImageDataTimeoutError(objId);
   })();
 
   cache.set(objId, promise);
