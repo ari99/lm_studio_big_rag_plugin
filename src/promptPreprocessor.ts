@@ -12,6 +12,7 @@ import {
 } from "./utils/embeddingIndexManifest";
 import * as path from "path";
 import { runIndexingJob } from "./ingestion/runIndexing";
+import { parseExcludePatternsBlock } from "./utils/fileExcludePatterns";
 
 /**
  * Check the abort signal and throw if the request has been cancelled.
@@ -159,6 +160,7 @@ export async function preprocess(
   const parseDelayMs = pluginConfig.get("parseDelayMs") ?? 0;
   const reindexRequested = pluginConfig.get("manualReindex.trigger");
   const resolvedEmbeddingModelId = resolveEmbeddingModelId(pluginConfig.get("embeddingModel"));
+  const excludePatterns = parseExcludePatternsBlock(pluginConfig.get("excludeFilenamePatterns") ?? "");
 
   // Validate configuration
   if (!documentsDir || documentsDir === "") {
@@ -248,6 +250,7 @@ export async function preprocess(
       enableOCR,
       parseDelayMs,
       reindexRequested,
+      excludePatterns,
       skipPreviouslyIndexed: pluginConfig.get("manualReindex.skipPreviouslyIndexed"),
     });
 
@@ -279,6 +282,7 @@ export async function preprocess(
             enableOCR,
             autoReindex: false,
             parseDelayMs,
+            excludePatterns,
             vectorStore,
             forceReindex: true,
             onProgress: (progress) => {
@@ -516,6 +520,7 @@ interface ConfigReindexOpts {
   enableOCR: boolean;
   parseDelayMs: number;
   reindexRequested: boolean;
+  excludePatterns: string[];
   skipPreviouslyIndexed: boolean;
 }
 
@@ -530,6 +535,7 @@ async function maybeHandleConfigTriggeredReindex({
   enableOCR,
   parseDelayMs,
   reindexRequested,
+  excludePatterns,
   skipPreviouslyIndexed,
 }: ConfigReindexOpts) {
   if (!reindexRequested) {
@@ -572,6 +578,7 @@ async function maybeHandleConfigTriggeredReindex({
       enableOCR,
       autoReindex: skipPreviouslyIndexed,
       parseDelayMs,
+      excludePatterns,
       forceReindex: !skipPreviouslyIndexed,
       vectorStore: vectorStore ?? undefined,
       onProgress: (progress) => {

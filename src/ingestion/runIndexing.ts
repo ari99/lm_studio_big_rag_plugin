@@ -16,6 +16,8 @@ export interface RunIndexingParams {
   enableOCR: boolean;
   autoReindex: boolean;
   parseDelayMs: number;
+  /** Glob patterns relative to documents dir; matching supported files are not parsed or embedded. */
+  excludePatterns?: string[];
   forceReindex?: boolean;
   vectorStore?: VectorStore;
   onProgress?: (progress: IndexingProgress) => void;
@@ -46,6 +48,7 @@ export async function runIndexingJob({
   enableOCR,
   autoReindex,
   parseDelayMs,
+  excludePatterns = [],
   forceReindex = false,
   vectorStore: existingVectorStore,
   onProgress,
@@ -72,6 +75,7 @@ export async function runIndexingJob({
     enableOCR,
     autoReindex: forceReindex ? false : autoReindex,
     parseDelayMs,
+    excludePatterns,
     abortSignal,
     onProgress,
   });

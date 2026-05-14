@@ -135,6 +135,18 @@ export const configSchematics = createConfigSchematics()
     true,
   )
   .field(
+    "excludeFilenamePatterns",
+    "string",
+    {
+      displayName: "Exclude filename patterns",
+      subtitle:
+        "Optional. One glob per line, matched against each file path relative to Documents Directory (use /). Lines starting with # are comments. Example: *.png excludes PNGs in any folder; archive/** excludes that subtree. Does not remove chunks already in the vector store—clear or reindex to drop old data.",
+      placeholder: "*.png\n# *.jpg",
+      isParagraph: true,
+    },
+    "",
+  )
+  .field(
     "manualReindex.trigger",
     "boolean",
     {

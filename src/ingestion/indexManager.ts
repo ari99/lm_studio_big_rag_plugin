@@ -1,7 +1,7 @@
 import PQueue from "p-queue";
 import * as fs from "fs";
 import * as path from "path";
-import { scanDirectory, type ScannedFile } from "./fileScanner";
+import { scanDirectory, type ScannedFile, type ExcludedFileInfo } from "./fileScanner";
 import { parseDocument, type ParseFailureReason } from "../parsers/documentParser";
 import { VectorStore, type DocumentChunk } from "../vectorstore/vectorStore";
 import { chunkText } from "../utils/textChunker";
@@ -9,6 +9,8 @@ import { calculateFileHash } from "../utils/fileHash";
 import { type EmbeddingDynamicHandle, type LMStudioClient } from "@lmstudio/sdk";
 import { FailedFileRegistry } from "../utils/failedFileRegistry";
 import { coerceEmbeddingVector } from "../utils/coerceEmbedding";
+
+const EXCLUDE_PROGRESS_THROTTLE = 40;
 
 export interface IndexingProgress {
   totalFiles: number;
@@ -48,6 +50,8 @@ export interface IndexingOptions {
   autoReindex: boolean;
   parseDelayMs: number;
   failureReportPath?: string;
+  /** Glob patterns (relative to documents dir); matched supported files are skipped before parsing. */
+  excludePatterns?: string[];
   abortSignal?: AbortSignal;
   onProgress?: (progress: IndexingProgress) => void;
 }
@@ -87,20 +91,76 @@ export class IndexManager {
         });
       }
 
-      const files = await scanDirectory(documentsDir, (scanned, found) => {
-        if (onProgress) {
-          onProgress({
-            totalFiles: found,
-            processedFiles: 0,
-            currentFile: `Scanned ${scanned} files...`,
-            status: "scanning",
-          });
-        }
-      });
+      const excludePatterns = this.options.excludePatterns ?? [];
+      let excludedByPattern = 0;
+      let lastExcludeProgressEmittedAt = 0;
+      let lastExcludedRelative = "";
+
+      const onExcludedFile: ((info: ExcludedFileInfo) => void) | undefined =
+        excludePatterns.length > 0
+          ? (info: ExcludedFileInfo) => {
+              excludedByPattern++;
+              lastExcludedRelative = info.relativePath;
+              console.log(
+                `Excluded from indexing (exclude pattern): ${info.relativePath} (matched: ${info.pattern})`,
+              );
+              if (!onProgress) {
+                return;
+              }
+              if (
+                excludedByPattern === 1 ||
+                excludedByPattern - lastExcludeProgressEmittedAt >= EXCLUDE_PROGRESS_THROTTLE
+              ) {
+                lastExcludeProgressEmittedAt = excludedByPattern;
+                onProgress({
+                  totalFiles: 0,
+                  processedFiles: 0,
+                  currentFile: `Excluded ${excludedByPattern} by pattern (latest: ${lastExcludedRelative})`,
+                  status: "scanning",
+                });
+              }
+            }
+          : undefined;
+
+      const files = await scanDirectory(
+        documentsDir,
+        (scanned, found) => {
+          if (onProgress) {
+            onProgress({
+              totalFiles: found,
+              processedFiles: 0,
+              currentFile: `Scanned ${scanned} files...`,
+              status: "scanning",
+            });
+          }
+        },
+        {
+          excludePatterns,
+          onExcludedFile,
+        },
+      );
+
+      if (
+        onProgress &&
+        excludedByPattern > 0 &&
+        excludedByPattern !== lastExcludeProgressEmittedAt
+      ) {
+        onProgress({
+          totalFiles: 0,
+          processedFiles: 0,
+          currentFile: `Excluded ${excludedByPattern} by pattern (latest: ${lastExcludedRelative})`,
+          status: "scanning",
+        });
+      }
 
       this.options.abortSignal?.throwIfAborted();
 
-      console.log(`Found ${files.length} files to process`);
+      console.log(
+        `Found ${files.length} files to process` +
+          (excludedByPattern > 0
+            ? ` (${excludedByPattern} excluded by exclude patterns)`
+            : ""),
+      );
 
       // Step 2: Index files
       let processedCount = 0;
@@ -219,7 +279,8 @@ export class IndexManager {
       });
 
       console.log(
-        `Indexing complete: ${successCount}/${files.length} files successfully indexed (${failCount} failed, skipped=${skippedCount}, updated=${updatedCount}, new=${newCount})`,
+        `Indexing complete: ${successCount}/${files.length} files successfully indexed (${failCount} failed, skipped=${skippedCount}, updated=${updatedCount}, new=${newCount})` +
+          (excludedByPattern > 0 ? `; excluded by pattern=${excludedByPattern}` : ""),
       );
       
       return {

@@ -13,7 +13,7 @@
     "push": "lms push",
     "bundle:dev": "esbuild .lmstudio/entry.ts --bundle --platform=node --format=cjs --packages=external --outfile=.lmstudio/dev.js",
     "build": "tsc && npm run bundle:dev",
-    "test": "npm run build && node --test dist/tests/parseDocument.test.js",
+    "test": "npm run build && node --test dist/tests/parseDocument.test.js dist/tests/fileExcludePatterns.test.js",
     "index:cli": "node dist/cliIndex.js",
     "index": "npm run build && node dist/cliIndex.js /Users/user/dev/new_cursor_projects/lmstudio_big_rag/data/original_data/gunsmithing_all /Users/user/dev/new_cursor_projects/lmstudio_big_rag/data/vectorstore"
   },
@@ -26,6 +26,7 @@
     "cheerio": "^1.0.0-rc.12",
     "epub2": "^3.0.2",
     "mime-types": "^2.1.35",
+    "minimatch": "^10.0.1",
     "p-queue": "^6.6.2",
     "pdf-parse": "^1.1.1",
     "pdfjs-dist": "^4.0.379",

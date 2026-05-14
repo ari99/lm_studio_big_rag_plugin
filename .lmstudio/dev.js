@@ -154,6 +154,16 @@ User Query:
       },
       true
     ).field(
+      "excludeFilenamePatterns",
+      "string",
+      {
+        displayName: "Exclude filename patterns",
+        subtitle: "Optional. One glob per line, matched against each file path relative to Documents Directory (use /). Lines starting with # are comments. Example: *.png excludes PNGs in any folder; archive/** excludes that subtree. Does not remove chunks already in the vector store\u2014clear or reindex to drop old data.",
+        placeholder: "*.png\n# *.jpg",
+        isParagraph: true
+      },
+      ""
+    ).field(
       "manualReindex.trigger",
       "boolean",
       {
@@ -741,13 +751,50 @@ var init_supportedExtensions = __esm({
   }
 });
 
+// src/utils/fileExcludePatterns.ts
+function parseExcludePatternsBlock(text) {
+  const out = [];
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line === "" || line.startsWith("#")) {
+      continue;
+    }
+    out.push(line);
+  }
+  return out;
+}
+function matchExcludePattern(relativePosixPath, patterns) {
+  for (const p of patterns) {
+    if ((0, import_minimatch.minimatch)(relativePosixPath, p, MINIMATCH_OPTS)) {
+      return p;
+    }
+  }
+  return null;
+}
+var import_minimatch, MINIMATCH_OPTS;
+var init_fileExcludePatterns = __esm({
+  "src/utils/fileExcludePatterns.ts"() {
+    "use strict";
+    import_minimatch = require("minimatch");
+    MINIMATCH_OPTS = {
+      dot: true,
+      matchBase: true,
+      windowsPathsNoEscape: true
+    };
+  }
+});
+
 // src/ingestion/fileScanner.ts
 function normalizeRootDir(rootDir) {
-  const normalized = path3.resolve(rootDir.trim()).replace(/\/+$/, "");
-  return normalized;
+  return path3.resolve(rootDir.trim()).replace(/[/\\]+$/, "");
 }
-async function scanDirectory(rootDir, onProgress) {
+function toPosixRelativePath(root, fullPath) {
+  return path3.relative(root, fullPath).split(path3.sep).join("/");
+}
+async function scanDirectory(rootDir, onProgress, options) {
   const root = normalizeRootDir(rootDir);
+  const excludePatterns = options?.excludePatterns ?? [];
+  const onExcludedFile = options?.onExcludedFile;
   try {
     await fs4.promises.access(root, fs4.constants.R_OK);
   } catch (err) {
@@ -773,16 +820,22 @@ async function scanDirectory(rootDir, onProgress) {
           scannedCount++;
           const ext = path3.extname(entry.name).toLowerCase();
           if (SUPPORTED_EXTENSIONS.has(ext)) {
-            const stats = await fs4.promises.stat(fullPath);
-            const mimeType = mime.lookup(fullPath);
-            files.push({
-              path: fullPath,
-              name: entry.name,
-              extension: ext,
-              mimeType,
-              size: stats.size,
-              mtime: stats.mtime
-            });
+            const relativePosix = toPosixRelativePath(root, fullPath);
+            const matchedPattern = excludePatterns.length > 0 ? matchExcludePattern(relativePosix, excludePatterns) : null;
+            if (matchedPattern !== null) {
+              onExcludedFile?.({ relativePath: relativePosix, pattern: matchedPattern });
+            } else {
+              const stats = await fs4.promises.stat(fullPath);
+              const mimeType = mime.lookup(fullPath);
+              files.push({
+                path: fullPath,
+                name: entry.name,
+                extension: ext,
+                mimeType,
+                size: stats.size,
+                mtime: stats.mtime
+              });
+            }
           }
           if (onProgress && scannedCount % 100 === 0) {
             onProgress(scannedCount, files.length);
@@ -807,6 +860,7 @@ var init_fileScanner = __esm({
     path3 = __toESM(require("path"));
     mime = __toESM(require("mime-types"));
     init_supportedExtensions();
+    init_fileExcludePatterns();
   }
 });
 
@@ -1656,7 +1710,7 @@ var init_failedFileRegistry = __esm({
 });
 
 // src/ingestion/indexManager.ts
-var import_p_queue, fs10, path6, IndexManager;
+var import_p_queue, fs10, path6, EXCLUDE_PROGRESS_THROTTLE, IndexManager;
 var init_indexManager = __esm({
   "src/ingestion/indexManager.ts"() {
     "use strict";
@@ -1669,6 +1723,7 @@ var init_indexManager = __esm({
     init_fileHash();
     init_failedFileRegistry();
     init_coerceEmbedding();
+    EXCLUDE_PROGRESS_THROTTLE = 40;
     IndexManager = class {
       constructor(options) {
         this.failureReasonCounts = {};
@@ -1693,18 +1748,58 @@ var init_indexManager = __esm({
               status: "scanning"
             });
           }
-          const files = await scanDirectory(documentsDir, (scanned, found) => {
-            if (onProgress) {
+          const excludePatterns = this.options.excludePatterns ?? [];
+          let excludedByPattern = 0;
+          let lastExcludeProgressEmittedAt = 0;
+          let lastExcludedRelative = "";
+          const onExcludedFile = excludePatterns.length > 0 ? (info) => {
+            excludedByPattern++;
+            lastExcludedRelative = info.relativePath;
+            console.log(
+              `Excluded from indexing (exclude pattern): ${info.relativePath} (matched: ${info.pattern})`
+            );
+            if (!onProgress) {
+              return;
+            }
+            if (excludedByPattern === 1 || excludedByPattern - lastExcludeProgressEmittedAt >= EXCLUDE_PROGRESS_THROTTLE) {
+              lastExcludeProgressEmittedAt = excludedByPattern;
               onProgress({
-                totalFiles: found,
+                totalFiles: 0,
                 processedFiles: 0,
-                currentFile: `Scanned ${scanned} files...`,
+                currentFile: `Excluded ${excludedByPattern} by pattern (latest: ${lastExcludedRelative})`,
                 status: "scanning"
               });
             }
-          });
+          } : void 0;
+          const files = await scanDirectory(
+            documentsDir,
+            (scanned, found) => {
+              if (onProgress) {
+                onProgress({
+                  totalFiles: found,
+                  processedFiles: 0,
+                  currentFile: `Scanned ${scanned} files...`,
+                  status: "scanning"
+                });
+              }
+            },
+            {
+              excludePatterns,
+              onExcludedFile
+            }
+          );
+          if (onProgress && excludedByPattern > 0 && excludedByPattern !== lastExcludeProgressEmittedAt) {
+            onProgress({
+              totalFiles: 0,
+              processedFiles: 0,
+              currentFile: `Excluded ${excludedByPattern} by pattern (latest: ${lastExcludedRelative})`,
+              status: "scanning"
+            });
+          }
           this.options.abortSignal?.throwIfAborted();
-          console.log(`Found ${files.length} files to process`);
+          console.log(
+            `Found ${files.length} files to process` + (excludedByPattern > 0 ? ` (${excludedByPattern} excluded by exclude patterns)` : "")
+          );
           let processedCount = 0;
           let successCount = 0;
           let failCount = 0;
@@ -1805,7 +1900,7 @@ var init_indexManager = __esm({
             newFiles: newCount
           });
           console.log(
-            `Indexing complete: ${successCount}/${files.length} files successfully indexed (${failCount} failed, skipped=${skippedCount}, updated=${updatedCount}, new=${newCount})`
+            `Indexing complete: ${successCount}/${files.length} files successfully indexed (${failCount} failed, skipped=${skippedCount}, updated=${updatedCount}, new=${newCount})` + (excludedByPattern > 0 ? `; excluded by pattern=${excludedByPattern}` : "")
           );
           return {
             totalFiles: files.length,
@@ -2027,6 +2122,7 @@ async function runIndexingJob({
   enableOCR,
   autoReindex,
   parseDelayMs,
+  excludePatterns = [],
   forceReindex = false,
   vectorStore: existingVectorStore,
   onProgress
@@ -2050,6 +2146,7 @@ async function runIndexingJob({
     enableOCR,
     autoReindex: forceReindex ? false : autoReindex,
     parseDelayMs,
+    excludePatterns,
     abortSignal,
     onProgress
   });
@@ -2193,6 +2290,7 @@ async function preprocess(ctl, userMessage) {
   const parseDelayMs = pluginConfig.get("parseDelayMs") ?? 0;
   const reindexRequested = pluginConfig.get("manualReindex.trigger");
   const resolvedEmbeddingModelId = resolveEmbeddingModelId(pluginConfig.get("embeddingModel"));
+  const excludePatterns = parseExcludePatternsBlock(pluginConfig.get("excludeFilenamePatterns") ?? "");
   if (!documentsDir || documentsDir === "") {
     console.warn("[BigRAG] Documents directory not configured. Please set it in plugin settings.");
     return userMessage;
@@ -2261,6 +2359,7 @@ async function preprocess(ctl, userMessage) {
       enableOCR,
       parseDelayMs,
       reindexRequested,
+      excludePatterns,
       skipPreviouslyIndexed: pluginConfig.get("manualReindex.skipPreviouslyIndexed")
     });
     checkAbort(ctl.abortSignal);
@@ -2287,6 +2386,7 @@ async function preprocess(ctl, userMessage) {
             enableOCR,
             autoReindex: false,
             parseDelayMs,
+            excludePatterns,
             vectorStore,
             forceReindex: true,
             onProgress: (progress) => {
@@ -2497,6 +2597,7 @@ async function maybeHandleConfigTriggeredReindex({
   enableOCR,
   parseDelayMs,
   reindexRequested,
+  excludePatterns,
   skipPreviouslyIndexed
 }) {
   if (!reindexRequested) {
@@ -2532,6 +2633,7 @@ async function maybeHandleConfigTriggeredReindex({
       enableOCR,
       autoReindex: skipPreviouslyIndexed,
       parseDelayMs,
+      excludePatterns,
       forceReindex: !skipPreviouslyIndexed,
       vectorStore: vectorStore ?? void 0,
       onProgress: (progress) => {
@@ -2621,6 +2723,7 @@ var init_promptPreprocessor = __esm({
     init_embeddingIndexManifest();
     path7 = __toESM(require("path"));
     init_runIndexing();
+    init_fileExcludePatterns();
     vectorStore = null;
     lastIndexedDir = "";
     sanityChecksPassed = false;

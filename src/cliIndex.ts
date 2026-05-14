@@ -3,6 +3,7 @@ import { VectorStore } from "./vectorstore/vectorStore";
 import { IndexManager } from "./ingestion/indexManager";
 import { resolveEmbeddingModelId } from "./config";
 import { syncEmbeddingManifestAfterIndexing } from "./utils/embeddingIndexManifest";
+import { parseExcludePatternsFromEnv } from "./utils/fileExcludePatterns";
 
 async function main() {
   const documentsDir = process.env.BIG_RAG_DOCS_DIR ?? process.argv[2];
@@ -33,6 +34,7 @@ async function main() {
     ? Number(process.env.BIG_RAG_PARSE_DELAY_MS)
     : 500;
   const failureReportPath = process.env.BIG_RAG_FAILURE_REPORT_PATH;
+  const excludePatterns = parseExcludePatternsFromEnv(process.env.BIG_RAG_EXCLUDE_PATTERNS);
 
   const resolvedEmbeddingModelId = resolveEmbeddingModelId(process.env.BIG_RAG_EMBEDDING_MODEL);
 
@@ -40,6 +42,9 @@ async function main() {
   console.log(`[BigRAG CLI] Documents dir: ${documentsDir}`);
   console.log(`[BigRAG CLI] Vector store dir: ${vectorStoreDir}`);
   console.log(`[BigRAG CLI] Embedding model: ${resolvedEmbeddingModelId}`);
+  if (excludePatterns.length > 0) {
+    console.log(`[BigRAG CLI] Exclude patterns (${excludePatterns.length}): ${excludePatterns.join(", ")}`);
+  }
 
   const client = new LMStudioClient();
 
@@ -63,6 +68,7 @@ async function main() {
     autoReindex,
     parseDelayMs,
     failureReportPath,
+    excludePatterns,
     onProgress: (progress) => {
       if (progress.status === "scanning") {
         console.log(

@@ -5,6 +5,7 @@ import {
   SUPPORTED_EXTENSIONS,
   listSupportedExtensions,
 } from "../utils/supportedExtensions";
+import { matchExcludePattern } from "../utils/fileExcludePatterns";
 
 export interface ScannedFile {
   path: string;
@@ -15,10 +16,23 @@ export interface ScannedFile {
   mtime: Date;
 }
 
+export interface ExcludedFileInfo {
+  relativePath: string;
+  pattern: string;
+}
+
+export interface ScanDirectoryOptions {
+  excludePatterns?: string[];
+  onExcludedFile?: (info: ExcludedFileInfo) => void;
+}
+
 /** Normalize and validate the root directory for scanning (resolves path, strips trailing slashes). */
 function normalizeRootDir(rootDir: string): string {
-  const normalized = path.resolve(rootDir.trim()).replace(/\/+$/, "");
-  return normalized;
+  return path.resolve(rootDir.trim()).replace(/[/\\]+$/, "");
+}
+
+function toPosixRelativePath(root: string, fullPath: string): string {
+  return path.relative(root, fullPath).split(path.sep).join("/");
 }
 
 /**
@@ -27,8 +41,12 @@ function normalizeRootDir(rootDir: string): string {
 export async function scanDirectory(
   rootDir: string,
   onProgress?: (current: number, total: number) => void,
+  options?: ScanDirectoryOptions,
 ): Promise<ScannedFile[]> {
   const root = normalizeRootDir(rootDir);
+  const excludePatterns = options?.excludePatterns ?? [];
+  const onExcludedFile = options?.onExcludedFile;
+
   try {
     await fs.promises.access(root, fs.constants.R_OK);
   } catch (err: any) {
@@ -49,31 +67,39 @@ export async function scanDirectory(
   async function walk(dir: string): Promise<void> {
     try {
       const entries = await fs.promises.readdir(dir, { withFileTypes: true });
-      
+
       for (const entry of entries) {
         const fullPath = path.join(dir, entry.name);
-        
+
         if (entry.isDirectory()) {
           await walk(fullPath);
         } else if (entry.isFile()) {
           scannedCount++;
-          
+
           const ext = path.extname(entry.name).toLowerCase();
-          
+
           if (SUPPORTED_EXTENSIONS.has(ext)) {
-            const stats = await fs.promises.stat(fullPath);
-            const mimeType = mime.lookup(fullPath);
-            
-            files.push({
-              path: fullPath,
-              name: entry.name,
-              extension: ext,
-              mimeType,
-              size: stats.size,
-              mtime: stats.mtime,
-            });
+            const relativePosix = toPosixRelativePath(root, fullPath);
+            const matchedPattern =
+              excludePatterns.length > 0 ? matchExcludePattern(relativePosix, excludePatterns) : null;
+
+            if (matchedPattern !== null) {
+              onExcludedFile?.({ relativePath: relativePosix, pattern: matchedPattern });
+            } else {
+              const stats = await fs.promises.stat(fullPath);
+              const mimeType = mime.lookup(fullPath);
+
+              files.push({
+                path: fullPath,
+                name: entry.name,
+                extension: ext,
+                mimeType,
+                size: stats.size,
+                mtime: stats.mtime,
+              });
+            }
           }
-          
+
           if (onProgress && scannedCount % 100 === 0) {
             onProgress(scannedCount, files.length);
           }
@@ -83,13 +109,13 @@ export async function scanDirectory(
       console.error(`Error scanning directory ${dir}:`, error);
     }
   }
-  
+
   await walk(root);
 
   if (onProgress) {
     onProgress(scannedCount, files.length);
   }
-  
+
   return files;
 }
 
@@ -100,4 +126,3 @@ export function isSupportedFile(filePath: string): boolean {
   const ext = path.extname(filePath).toLowerCase();
   return SUPPORTED_EXTENSIONS.has(ext);
 }
-
