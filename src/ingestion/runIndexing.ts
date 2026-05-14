@@ -1,12 +1,15 @@
 import { type LMStudioClient } from "@lmstudio/sdk";
 import { IndexManager, type IndexingProgress, type IndexingResult } from "./indexManager";
 import { VectorStore } from "../vectorstore/vectorStore";
+import { resolveEmbeddingModelId } from "../config";
+import { syncEmbeddingManifestAfterIndexing } from "../utils/embeddingIndexManifest";
 
 export interface RunIndexingParams {
   client: LMStudioClient;
   abortSignal: AbortSignal;
   documentsDir: string;
   vectorStoreDir: string;
+  embeddingModelId: string;
   chunkSize: number;
   chunkOverlap: number;
   maxConcurrent: number;
@@ -36,6 +39,7 @@ export async function runIndexingJob({
   abortSignal,
   documentsDir,
   vectorStoreDir,
+  embeddingModelId,
   chunkSize,
   chunkOverlap,
   maxConcurrent,
@@ -53,10 +57,8 @@ export async function runIndexingJob({
     await vectorStore.initialize();
   }
 
-  const embeddingModel = await client.embedding.model(
-    "nomic-ai/nomic-embed-text-v1.5-GGUF",
-    { signal: abortSignal },
-  );
+  const resolvedModelId = resolveEmbeddingModelId(embeddingModelId);
+  const embeddingModel = await client.embedding.model(resolvedModelId, { signal: abortSignal });
 
   const indexManager = new IndexManager({
     documentsDir,
@@ -76,6 +78,13 @@ export async function runIndexingJob({
 
   const indexingResult = await indexManager.index();
   const stats = await vectorStore.getStats();
+
+  await syncEmbeddingManifestAfterIndexing(
+    vectorStoreDir,
+    stats.totalChunks,
+    resolvedModelId,
+    embeddingModel,
+  );
 
   if (ownsVectorStore) {
     await vectorStore.close();

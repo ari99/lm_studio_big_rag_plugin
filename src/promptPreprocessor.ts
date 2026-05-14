@@ -2,10 +2,14 @@ import {
   type ChatMessage,
   type PromptPreprocessorController,
 } from "@lmstudio/sdk";
-import { configSchematics, DEFAULT_PROMPT_TEMPLATE } from "./config";
+import { configSchematics, DEFAULT_PROMPT_TEMPLATE, resolveEmbeddingModelId } from "./config";
 import { VectorStore } from "./vectorstore/vectorStore";
 import { performSanityChecks } from "./utils/sanityChecks";
 import { tryStartIndexing, finishIndexing } from "./utils/indexingLock";
+import {
+  checkEmbeddingModelForRetrieval,
+  deleteEmbeddingIndexManifest,
+} from "./utils/embeddingIndexManifest";
 import * as path from "path";
 import { runIndexingJob } from "./ingestion/runIndexing";
 
@@ -154,6 +158,7 @@ export async function preprocess(
   const skipPreviouslyIndexed = pluginConfig.get("manualReindex.skipPreviouslyIndexed");
   const parseDelayMs = pluginConfig.get("parseDelayMs") ?? 0;
   const reindexRequested = pluginConfig.get("manualReindex.trigger");
+  const resolvedEmbeddingModelId = resolveEmbeddingModelId(pluginConfig.get("embeddingModel"));
 
   // Validate configuration
   if (!documentsDir || documentsDir === "") {
@@ -215,6 +220,10 @@ export async function preprocess(
 
       vectorStore = new VectorStore(vectorStoreDir);
       await vectorStore.initialize();
+      const statsAfterInit = await vectorStore.getStats();
+      if (statsAfterInit.totalChunks === 0) {
+        await deleteEmbeddingIndexManifest(vectorStoreDir);
+      }
       console.info(
         `[BigRAG] Vector store ready (path=${vectorStoreDir}). Waiting for queries...`,
       );
@@ -232,6 +241,7 @@ export async function preprocess(
       ctl,
       documentsDir,
       vectorStoreDir,
+      embeddingModelId: resolvedEmbeddingModelId,
       chunkSize,
       chunkOverlap,
       maxConcurrent,
@@ -253,7 +263,7 @@ export async function preprocess(
       } else {
         const indexStatus = ctl.createStatus({
           status: "loading",
-          text: "Starting initial indexing...",
+          text: `Starting initial indexing… (embedding model: ${resolvedEmbeddingModelId})`,
         });
 
         try {
@@ -262,6 +272,7 @@ export async function preprocess(
             abortSignal: ctl.abortSignal,
             documentsDir,
             vectorStoreDir,
+            embeddingModelId: resolvedEmbeddingModelId,
             chunkSize,
             chunkOverlap,
             maxConcurrent,
@@ -274,7 +285,7 @@ export async function preprocess(
               if (progress.status === "scanning") {
                 indexStatus.setState({
                   status: "loading",
-                  text: `Scanning: ${progress.currentFile}`,
+                  text: `Scanning: ${progress.currentFile} (embedding model: ${resolvedEmbeddingModelId})`,
                 });
               } else if (progress.status === "indexing") {
                 const success = progress.successfulFiles ?? 0;
@@ -284,12 +295,13 @@ export async function preprocess(
                   status: "loading",
                   text: `Indexing: ${progress.processedFiles}/${progress.totalFiles} files ` +
                     `(success=${success}, failed=${failed}, skipped=${skipped}) ` +
+                    `(embedding model: ${resolvedEmbeddingModelId}) ` +
                     `(${progress.currentFile})`,
                 });
               } else if (progress.status === "complete") {
                 indexStatus.setState({
                   status: "done",
-                  text: `Indexing complete: ${progress.processedFiles} files processed`,
+                  text: `Indexing complete: ${progress.processedFiles} files processed (embedding model: ${resolvedEmbeddingModelId})`,
                 });
               } else if (progress.status === "error") {
                 indexStatus.setState({
@@ -318,25 +330,54 @@ export async function preprocess(
     // Log manual reindex toggle states for visibility on each chat
     const toggleStatusText =
       `Manual Reindex Trigger: ${reindexRequested ? "ON" : "OFF"} | ` +
-      `Skip Previously Indexed: ${skipPreviouslyIndexed ? "ON" : "OFF"}`;
+      `Skip Previously Indexed: ${skipPreviouslyIndexed ? "ON" : "OFF"} | ` +
+      `Embedding model: ${resolvedEmbeddingModelId}`;
     console.info(`[BigRAG] ${toggleStatusText}`);
     ctl.createStatus({
       status: "done",
       text: toggleStatusText,
     });
 
+    const retrievalStats = await vectorStore.getStats();
+    if (retrievalStats.totalChunks === 0) {
+      await deleteEmbeddingIndexManifest(vectorStoreDir);
+      ctl.createStatus({
+        status: "canceled",
+        text: "No documents indexed yet",
+      });
+      const noteAboutEmptyIndex =
+        `Important: The document index is empty (no chunks stored yet). ` +
+        `In one short sentence, tell the user that nothing has been indexed. ` +
+        `Then answer their question to the best of your ability without claiming document retrieval.`;
+      return noteAboutEmptyIndex + `\n\nUser Query:\n\n${userPrompt}`;
+    }
+
     // Perform retrieval
     const retrievalStatus = ctl.createStatus({
       status: "loading",
-      text: "Loading embedding model for retrieval...",
+      text: `Loading embedding model for retrieval: ${resolvedEmbeddingModelId}`,
     });
 
-    const embeddingModel = await ctl.client.embedding.model(
-      "nomic-ai/nomic-embed-text-v1.5-GGUF",
-      { signal: ctl.abortSignal }
-    );
+    const embeddingModel = await ctl.client.embedding.model(resolvedEmbeddingModelId, {
+      signal: ctl.abortSignal,
+    });
 
     checkAbort(ctl.abortSignal);
+
+    const compatibility = await checkEmbeddingModelForRetrieval({
+      vectorStoreDir,
+      resolvedModelId: resolvedEmbeddingModelId,
+      totalChunks: retrievalStats.totalChunks,
+      embeddingModel,
+    });
+    if (!compatibility.ok) {
+      retrievalStatus.setState({
+        status: "error",
+        text: compatibility.userMessage,
+      });
+      console.error("[BigRAG]", compatibility.logMessage);
+      return compatibility.userMessage + `\n\nUser Query:\n\n${userPrompt}`;
+    }
 
     retrievalStatus.setState({
       status: "loading",
@@ -468,6 +509,7 @@ interface ConfigReindexOpts {
   ctl: PromptPreprocessorController;
   documentsDir: string;
   vectorStoreDir: string;
+  embeddingModelId: string;
   chunkSize: number;
   chunkOverlap: number;
   maxConcurrent: number;
@@ -481,6 +523,7 @@ async function maybeHandleConfigTriggeredReindex({
   ctl,
   documentsDir,
   vectorStoreDir,
+  embeddingModelId,
   chunkSize,
   chunkOverlap,
   maxConcurrent,
@@ -495,7 +538,8 @@ async function maybeHandleConfigTriggeredReindex({
 
   const reminderText =
     `Manual Reindex Trigger is ON. Skip Previously Indexed Files is currently ${skipPreviouslyIndexed ? "ON" : "OFF"}. ` +
-    "The index will be rebuilt each chat when 'Skip Previously Indexed Files' is OFF. If 'Skip Previously Indexed Files' is ON, the index will only be rebuilt for new or changed files.";
+    "The index will be rebuilt each chat when 'Skip Previously Indexed Files' is OFF. If 'Skip Previously Indexed Files' is ON, the index will only be rebuilt for new or changed files. " +
+    `Embedding model for this run: ${embeddingModelId}.`;
   console.info(`[BigRAG] ${reminderText}`);
   ctl.createStatus({
     status: "done",
@@ -512,7 +556,7 @@ async function maybeHandleConfigTriggeredReindex({
 
   const status = ctl.createStatus({
     status: "loading",
-    text: "Manual reindex requested from config...",
+    text: `Manual reindex requested from config… (embedding model: ${embeddingModelId})`,
   });
 
   try {
@@ -521,6 +565,7 @@ async function maybeHandleConfigTriggeredReindex({
       abortSignal: ctl.abortSignal,
       documentsDir,
       vectorStoreDir,
+      embeddingModelId,
       chunkSize,
       chunkOverlap,
       maxConcurrent,
@@ -533,7 +578,7 @@ async function maybeHandleConfigTriggeredReindex({
         if (progress.status === "scanning") {
           status.setState({
             status: "loading",
-            text: `Scanning: ${progress.currentFile}`,
+            text: `Scanning: ${progress.currentFile} (embedding model: ${embeddingModelId})`,
           });
         } else if (progress.status === "indexing") {
           const success = progress.successfulFiles ?? 0;
@@ -543,12 +588,13 @@ async function maybeHandleConfigTriggeredReindex({
             status: "loading",
             text: `Indexing: ${progress.processedFiles}/${progress.totalFiles} files ` +
               `(success=${success}, failed=${failed}, skipped=${skipped}) ` +
+              `(embedding model: ${embeddingModelId}) ` +
               `(${progress.currentFile})`,
           });
         } else if (progress.status === "complete") {
           status.setState({
             status: "done",
-            text: `Indexing complete: ${progress.processedFiles} files processed`,
+            text: `Indexing complete: ${progress.processedFiles} files processed (embedding model: ${embeddingModelId})`,
           });
         } else if (progress.status === "error") {
           status.setState({
@@ -561,10 +607,11 @@ async function maybeHandleConfigTriggeredReindex({
 
     status.setState({
       status: "done",
-      text: "Manual reindex complete!",
+      text: `Manual reindex complete! (embedding model: ${embeddingModelId})`,
     });
 
     const summaryLines = [
+      `Embedding model: ${embeddingModelId}`,
       `Processed: ${indexingResult.successfulFiles}/${indexingResult.totalFiles}`,
       `Failed: ${indexingResult.failedFiles}`,
       `Skipped (unchanged): ${indexingResult.skippedFiles}`,
@@ -589,7 +636,7 @@ async function maybeHandleConfigTriggeredReindex({
       `[BigRAG] Manual reindex summary:\n  ${summaryLines.join("\n  ")}`,
     );
 
-    await notifyManualResetNeeded(ctl);
+    await notifyManualResetNeeded(ctl, embeddingModelId);
   } catch (error) {
     status.setState({
       status: "error",
@@ -601,12 +648,15 @@ async function maybeHandleConfigTriggeredReindex({
   }
 }
 
-async function notifyManualResetNeeded(ctl: PromptPreprocessorController) {
+async function notifyManualResetNeeded(
+  ctl: PromptPreprocessorController,
+  embeddingModelId: string,
+) {
   try {
     await ctl.client.system.notify({
       title: "Manual reindex completed",
       description:
-        "Manual Reindex Trigger is ON. The index will be rebuilt each chat when 'Skip Previously Indexed Files' is OFF. If 'Skip Previously Indexed Files' is ON, the index will only be rebuilt for new or changed files.",
+        `Manual Reindex Trigger is ON. The index will be rebuilt each chat when 'Skip Previously Indexed Files' is OFF. If 'Skip Previously Indexed Files' is ON, the index will only be rebuilt for new or changed files. Last run used embedding model: ${embeddingModelId}.`,
     });
   } catch (error) {
     console.warn("[BigRAG] Unable to send notification about manual reindex reset:", error);

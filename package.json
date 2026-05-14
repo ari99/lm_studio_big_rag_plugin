@@ -11,7 +11,8 @@
   "scripts": {
     "dev": "lms dev",
     "push": "lms push",
-    "build": "tsc",
+    "bundle:dev": "esbuild .lmstudio/entry.ts --bundle --platform=node --format=cjs --packages=external --outfile=.lmstudio/dev.js",
+    "build": "tsc && npm run bundle:dev",
     "test": "npm run build && node --test dist/tests/parseDocument.test.js",
     "index:cli": "node dist/cliIndex.js",
     "index": "npm run build && node dist/cliIndex.js /Users/user/dev/new_cursor_projects/lmstudio_big_rag/data/original_data/gunsmithing_all /Users/user/dev/new_cursor_projects/lmstudio_big_rag/data/vectorstore"
@@ -37,6 +38,7 @@
     "@lancedb/lancedb-darwin-arm64": "^0.24.1"
   },
   "devDependencies": {
+    "esbuild": "^0.25.0",
     "@types/mime-types": "^2.1.4",
     "@types/node": "^20.14.8",
     "@types/pdf-parse": "^1.1.5",

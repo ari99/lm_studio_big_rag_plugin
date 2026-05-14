@@ -46,6 +46,7 @@ This will start the plugin and register it with LM Studio.
 - **Vector Store Directory**: Where to store the index (e.g., `/Users/yourname/.lmstudio/big-rag-db`)
 
 **Optional Settings (use defaults for now):**
+- **Embedding Model**: Either form can work (e.g. `mixedbread-ai/mxbai-embed-large-v1` or `text-embedding-mxbai-embed-large-v1` for the same mxbai embedder). Pick **one** string and keep it so it matches `.big-rag-embedding.json` after indexing. Default: `nomic-ai/nomic-embed-text-v1.5-GGUF`. Change only if you intend to reindex.
 - Manual Reindex Trigger: OFF (leave it off unless you actively want to rerun indexing on every chat; turning it ON exposes the Skip option below and causes the plugin to rebuild the index each time you send a message)
 - Retrieval Limit: 5
 - Affinity Threshold: 0.5

@@ -1,6 +1,8 @@
 import { LMStudioClient } from "@lmstudio/sdk";
 import { VectorStore } from "./vectorstore/vectorStore";
 import { IndexManager } from "./ingestion/indexManager";
+import { resolveEmbeddingModelId } from "./config";
+import { syncEmbeddingManifestAfterIndexing } from "./utils/embeddingIndexManifest";
 
 async function main() {
   const documentsDir = process.env.BIG_RAG_DOCS_DIR ?? process.argv[2];
@@ -32,14 +34,12 @@ async function main() {
     : 500;
   const failureReportPath = process.env.BIG_RAG_FAILURE_REPORT_PATH;
 
-  const embeddingModelId =
-    process.env.BIG_RAG_EMBEDDING_MODEL ??
-    "nomic-ai/nomic-embed-text-v1.5-GGUF";
+  const resolvedEmbeddingModelId = resolveEmbeddingModelId(process.env.BIG_RAG_EMBEDDING_MODEL);
 
   console.log("[BigRAG CLI] Starting indexing");
   console.log(`[BigRAG CLI] Documents dir: ${documentsDir}`);
   console.log(`[BigRAG CLI] Vector store dir: ${vectorStoreDir}`);
-  console.log(`[BigRAG CLI] Embedding model: ${embeddingModelId}`);
+  console.log(`[BigRAG CLI] Embedding model: ${resolvedEmbeddingModelId}`);
 
   const client = new LMStudioClient();
 
@@ -48,7 +48,7 @@ async function main() {
   await vectorStore.initialize();
 
   console.log("[BigRAG CLI] Loading embedding model...");
-  const embeddingModel = await client.embedding.model(embeddingModelId);
+  const embeddingModel = await client.embedding.model(resolvedEmbeddingModelId);
 
   const indexManager = new IndexManager({
     documentsDir,
@@ -89,6 +89,12 @@ async function main() {
   try {
     const result = await indexManager.index();
     const stats = await vectorStore.getStats();
+    await syncEmbeddingManifestAfterIndexing(
+      vectorStoreDir,
+      stats.totalChunks,
+      resolvedEmbeddingModelId,
+      embeddingModel,
+    );
 
     console.log(
       "[BigRAG CLI] Indexing finished:\n" +

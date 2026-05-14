@@ -1,5 +1,13 @@
 import { createConfigSchematics } from "@lmstudio/sdk";
 
+/** Default embedding model id (must match CLI default when env is unset). */
+export const DEFAULT_EMBEDDING_MODEL_ID = "nomic-ai/nomic-embed-text-v1.5-GGUF";
+
+export function resolveEmbeddingModelId(raw: string | undefined | null): string {
+  const t = typeof raw === "string" ? raw.trim() : "";
+  return t.length > 0 ? t : DEFAULT_EMBEDDING_MODEL_ID;
+}
+
 export const DEFAULT_PROMPT_TEMPLATE = `{{rag_context}}
 
 Use the citations above to respond to the user query, only if they are relevant. Otherwise, respond to the best of your ability without them.
@@ -28,6 +36,17 @@ export const configSchematics = createConfigSchematics()
       placeholder: "/path/to/vector/store",
     },
     "",
+  )
+  .field(
+    "embeddingModel",
+    "string",
+    {
+      displayName: "Embedding Model",
+      subtitle:
+        "LM Studio accepts more than one spelling for the same model—for example mixedbread-ai/mxbai-embed-large-v1 (Hub / download) or text-embedding-mxbai-embed-large-v1 (as in lms ls). Both are valid; use one value consistently for indexing and chat so it matches .big-rag-embedding.json. Reindex after changing.",
+      placeholder: DEFAULT_EMBEDDING_MODEL_ID,
+    },
+    DEFAULT_EMBEDDING_MODEL_ID,
   )
   .field(
     "retrievalLimit",

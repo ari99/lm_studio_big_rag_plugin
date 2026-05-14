@@ -52,6 +52,13 @@ The plugin provides the following configuration options in LM Studio:
 - **Documents Directory**: Root directory containing your documents (read access required)
 - **Vector Store Directory**: Where the vector database will be stored (read/write access required)
 
+### Embedding model
+
+- **Embedding Model** (plugin setting): String passed to LM Studio’s embedding load API. **Both** common forms can work for the same weights—for example **`mixedbread-ai/mxbai-embed-large-v1`** (Hub / `lms get`) and **`text-embedding-mxbai-embed-large-v1`** (as shown in `lms ls`). Use **one** spelling consistently for indexing and retrieval so it matches **`.big-rag-embedding.json`**; switching spelling without reindexing can trigger a mismatch warning. Default: `nomic-ai/nomic-embed-text-v1.5-GGUF`.
+- **After changing the embedding model**, run a **full reindex** (toggle *Manual Reindex Trigger* with *Skip Previously Indexed Files* off, or clear the vector store and let first-run indexing rebuild). Vectors from different models are not comparable in the same index.
+- **`.big-rag-embedding.json`**: Written under the vector store directory when the index has at least one chunk; records the model id and vector length used to build the index. If the configured model no longer matches this file, retrieval is blocked until you reindex or revert the setting. If the index has **zero** chunks, this file is removed so metadata cannot drift (including after manual shard deletion).
+- **Indexes built with older plugin versions** may have chunks but no manifest; retrieval still works, and a full reindex will create the manifest.
+
 ### Retrieval Settings
 
 - **Retrieval Limit** (1-20, default: 5): Maximum number of chunks to return
@@ -145,6 +152,11 @@ The plugin provides the following configuration options in LM Studio:
 - Try lowering the retrieval affinity threshold
 - Check LM Studio logs for errors
 
+### Embedding model mismatch
+
+- If you see a message that the index was built with a **different embedding model** than the one in settings, either change **Embedding Model** back to the value recorded in `.big-rag-embedding.json` or run a **full reindex** after changing the model.
+- **Dimension mismatch** means the model’s output size changed; reindex after switching models or quantizations.
+
 ### Slow Indexing
 
 - Reduce `maxConcurrentFiles`
@@ -167,6 +179,7 @@ The plugin provides the following configuration options in LM Studio:
 
 - The CLI logs cumulative `success` / `failed` counts after each processed document.
 - Set `BIG_RAG_FAILURE_REPORT_PATH=/absolute/path/report.json` when running `npm run index` (or via LM Studio env settings) to emit a JSON report containing all failure reasons and counts after indexing completes. This is useful when triaging stubborn PDFs such as blueprints or large scanned books.
+- **`BIG_RAG_EMBEDDING_MODEL`**: Optional. When set for headless indexing (`npm run index:cli` / `dist/cliIndex.js`), overrides the default embedding model id (same default as the plugin’s **Embedding Model** setting). Empty/unset uses the built-in default from `config.ts`.
 
 ## Limitations
 
@@ -198,8 +211,10 @@ big-rag-plugin/
 │   ├── vectorstore/
 │   │   └── vectorStore.ts     # Vectra sharded index integration
 │   └── utils/
-│       ├── fileHash.ts        # File hashing
-│       └── textChunker.ts     # Text chunking
+│       ├── coerceEmbedding.ts       # Normalize embedding API vectors
+│       ├── embeddingIndexManifest.ts # Index embedding metadata on disk
+│       ├── fileHash.ts              # File hashing
+│       └── textChunker.ts           # Text chunking
 ├── manifest.json              # Plugin manifest
 ├── package.json               # Dependencies
 ├── tsconfig.json              # TypeScript config
