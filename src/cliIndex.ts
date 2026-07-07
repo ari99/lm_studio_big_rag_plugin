@@ -4,6 +4,7 @@ import { IndexManager } from "./ingestion/indexManager";
 import { resolveEmbeddingModelId } from "./config";
 import { syncEmbeddingManifestAfterIndexing } from "./utils/embeddingIndexManifest";
 import { parseExcludePatternsFromEnv } from "./utils/fileExcludePatterns";
+import { parseAdditionalExtensionsFromEnv, resolveAdditionalExtensions } from "./utils/additionalExtensions";
 
 async function main() {
   const documentsDir = process.env.BIG_RAG_DOCS_DIR ?? process.argv[2];
@@ -35,6 +36,10 @@ async function main() {
     : 500;
   const failureReportPath = process.env.BIG_RAG_FAILURE_REPORT_PATH;
   const excludePatterns = parseExcludePatternsFromEnv(process.env.BIG_RAG_EXCLUDE_PATTERNS);
+  const { additionalPlainTextSet: additionalPlainTextExtensions } = resolveAdditionalExtensions(
+    parseAdditionalExtensionsFromEnv(process.env.BIG_RAG_ADDITIONAL_EXTENSIONS).join("\n"),
+    (message) => console.warn(message),
+  );
 
   const resolvedEmbeddingModelId = resolveEmbeddingModelId(process.env.BIG_RAG_EMBEDDING_MODEL);
 
@@ -44,6 +49,11 @@ async function main() {
   console.log(`[BigRAG CLI] Embedding model: ${resolvedEmbeddingModelId}`);
   if (excludePatterns.length > 0) {
     console.log(`[BigRAG CLI] Exclude patterns (${excludePatterns.length}): ${excludePatterns.join(", ")}`);
+  }
+  if (additionalPlainTextExtensions.size > 0) {
+    console.log(
+      `[BigRAG CLI] Additional plain-text extensions: ${Array.from(additionalPlainTextExtensions.values()).sort().join(", ")}`,
+    );
   }
 
   const client = new LMStudioClient();
@@ -69,6 +79,7 @@ async function main() {
     parseDelayMs,
     failureReportPath,
     excludePatterns,
+    additionalPlainTextExtensions,
     onProgress: (progress) => {
       if (progress.status === "scanning") {
         console.log(

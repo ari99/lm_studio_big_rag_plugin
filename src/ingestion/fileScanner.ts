@@ -2,10 +2,10 @@ import * as fs from "fs";
 import * as path from "path";
 import * as mime from "mime-types";
 import {
-  SUPPORTED_EXTENSIONS,
   listSupportedExtensions,
 } from "../utils/supportedExtensions";
 import { matchExcludePattern } from "../utils/fileExcludePatterns";
+import { buildEffectiveExtensionSet } from "../utils/additionalExtensions";
 
 export interface ScannedFile {
   path: string;
@@ -23,6 +23,7 @@ export interface ExcludedFileInfo {
 
 export interface ScanDirectoryOptions {
   excludePatterns?: string[];
+  additionalPlainTextExtensions?: ReadonlySet<string>;
   onExcludedFile?: (info: ExcludedFileInfo) => void;
 }
 
@@ -45,7 +46,9 @@ export async function scanDirectory(
 ): Promise<ScannedFile[]> {
   const root = normalizeRootDir(rootDir);
   const excludePatterns = options?.excludePatterns ?? [];
+  const additionalPlainTextExtensions = options?.additionalPlainTextExtensions ?? new Set<string>();
   const onExcludedFile = options?.onExcludedFile;
+  const effectiveExtensions = buildEffectiveExtensionSet(additionalPlainTextExtensions);
 
   try {
     await fs.promises.access(root, fs.constants.R_OK);
@@ -62,7 +65,11 @@ export async function scanDirectory(
   let scannedCount = 0;
 
   const supportedExtensionsDescription = listSupportedExtensions().join(", ");
-  console.log(`[Scanner] Supported extensions: ${supportedExtensionsDescription}`);
+  console.log(`[Scanner] Built-in extensions: ${supportedExtensionsDescription}`);
+  if (additionalPlainTextExtensions.size > 0) {
+    const additionalList = Array.from(additionalPlainTextExtensions.values()).sort().join(", ");
+    console.log(`[Scanner] Additional plain-text extensions: ${additionalList}`);
+  }
 
   async function walk(dir: string): Promise<void> {
     try {
@@ -78,7 +85,7 @@ export async function scanDirectory(
 
           const ext = path.extname(entry.name).toLowerCase();
 
-          if (SUPPORTED_EXTENSIONS.has(ext)) {
+          if (effectiveExtensions.has(ext)) {
             const relativePosix = toPosixRelativePath(root, fullPath);
             const matchedPattern =
               excludePatterns.length > 0 ? matchExcludePattern(relativePosix, excludePatterns) : null;
@@ -120,9 +127,12 @@ export async function scanDirectory(
 }
 
 /**
- * Check if a file type is supported
+ * Check if a file type is supported (built-in plus optional user plain-text extensions).
  */
-export function isSupportedFile(filePath: string): boolean {
+export function isSupportedFile(
+  filePath: string,
+  additionalPlainTextExtensions: ReadonlySet<string> = new Set<string>(),
+): boolean {
   const ext = path.extname(filePath).toLowerCase();
-  return SUPPORTED_EXTENSIONS.has(ext);
+  return buildEffectiveExtensionSet(additionalPlainTextExtensions).has(ext);
 }

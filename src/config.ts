@@ -147,6 +147,18 @@ export const configSchematics = createConfigSchematics()
     "",
   )
   .field(
+    "additionalExtensions",
+    "string",
+    {
+      displayName: "Additional plain-text extensions",
+      subtitle:
+        "Optional. One extension per line (e.g. .java, .cs, .py). Files are read as plain text. Binaries such as .exe and .zip are rejected. Built-in types like PDF and EPUB do not need to be listed.",
+      placeholder: ".java\n.cs\n.py",
+      isParagraph: true,
+    },
+    "",
+  )
+  .field(
     "manualReindex.trigger",
     "boolean",
     {

@@ -164,6 +164,16 @@ User Query:
       },
       ""
     ).field(
+      "additionalExtensions",
+      "string",
+      {
+        displayName: "Additional plain-text extensions",
+        subtitle: "Optional. One extension per line (e.g. .java, .cs, .py). Files are read as plain text. Binaries such as .exe and .zip are rejected. Built-in types like PDF and EPUB do not need to be listed.",
+        placeholder: ".java\n.cs\n.py",
+        isParagraph: true
+      },
+      ""
+    ).field(
       "manualReindex.trigger",
       "boolean",
       {
@@ -199,251 +209,20 @@ User Query:
   }
 });
 
-// src/vectorstore/vectorStore.ts
-var fs, path, import_vectra, MAX_ITEMS_PER_SHARD, SHARD_DIR_PREFIX, SHARD_DIR_REGEX, VectorStore;
-var init_vectorStore = __esm({
-  "src/vectorstore/vectorStore.ts"() {
-    "use strict";
-    fs = __toESM(require("fs/promises"));
-    path = __toESM(require("path"));
-    import_vectra = require("vectra");
-    MAX_ITEMS_PER_SHARD = 1e4;
-    SHARD_DIR_PREFIX = "shard_";
-    SHARD_DIR_REGEX = /^shard_(\d+)$/;
-    VectorStore = class {
-      constructor(dbPath) {
-        this.shardDirs = [];
-        this.activeShard = null;
-        this.activeShardCount = 0;
-        this.updateMutex = Promise.resolve();
-        this.dbPath = path.resolve(dbPath);
-      }
-      /**
-       * Open a shard by directory name (e.g. "shard_000"). Caller must not hold the reference
-       * after use so GC can free the parsed index data.
-       */
-      openShard(dir) {
-        const fullPath = path.join(this.dbPath, dir);
-        return new import_vectra.LocalIndex(fullPath);
-      }
-      /**
-       * Scan dbPath for shard_NNN directories and return sorted list.
-       */
-      async discoverShardDirs() {
-        const entries = await fs.readdir(this.dbPath, { withFileTypes: true });
-        const dirs = [];
-        for (const e of entries) {
-          if (e.isDirectory() && SHARD_DIR_REGEX.test(e.name)) {
-            dirs.push(e.name);
-          }
-        }
-        dirs.sort((a, b) => {
-          const n = (m) => parseInt(m.match(SHARD_DIR_REGEX)[1], 10);
-          return n(a) - n(b);
-        });
-        return dirs;
-      }
-      /**
-       * Initialize the vector store: discover or create shards, open the last as active.
-       */
-      async initialize() {
-        await fs.mkdir(this.dbPath, { recursive: true });
-        this.shardDirs = await this.discoverShardDirs();
-        if (this.shardDirs.length === 0) {
-          const firstDir = `${SHARD_DIR_PREFIX}000`;
-          const fullPath = path.join(this.dbPath, firstDir);
-          const index = new import_vectra.LocalIndex(fullPath);
-          await index.createIndex({ version: 1 });
-          this.shardDirs = [firstDir];
-          this.activeShard = index;
-          this.activeShardCount = 0;
-        } else {
-          const lastDir = this.shardDirs[this.shardDirs.length - 1];
-          this.activeShard = this.openShard(lastDir);
-          const items = await this.activeShard.listItems();
-          this.activeShardCount = items.length;
-        }
-        console.log("Vector store initialized successfully");
-      }
-      /**
-       * Add document chunks to the active shard. Rotates to a new shard when full.
-       */
-      async addChunks(chunks) {
-        if (!this.activeShard) {
-          throw new Error("Vector store not initialized");
-        }
-        if (chunks.length === 0) return;
-        this.updateMutex = this.updateMutex.then(async () => {
-          await this.activeShard.beginUpdate();
-          try {
-            for (const chunk of chunks) {
-              const metadata = {
-                text: chunk.text,
-                filePath: chunk.filePath,
-                fileName: chunk.fileName,
-                fileHash: chunk.fileHash,
-                chunkIndex: chunk.chunkIndex,
-                ...chunk.metadata
-              };
-              await this.activeShard.upsertItem({
-                id: chunk.id,
-                vector: chunk.vector,
-                metadata
-              });
-            }
-            await this.activeShard.endUpdate();
-          } catch (e) {
-            this.activeShard.cancelUpdate();
-            throw e;
-          }
-          this.activeShardCount += chunks.length;
-          console.log(`Added ${chunks.length} chunks to vector store`);
-          if (this.activeShardCount >= MAX_ITEMS_PER_SHARD) {
-            const nextNum = this.shardDirs.length;
-            const nextDir = `${SHARD_DIR_PREFIX}${String(nextNum).padStart(3, "0")}`;
-            const fullPath = path.join(this.dbPath, nextDir);
-            const newIndex = new import_vectra.LocalIndex(fullPath);
-            await newIndex.createIndex({ version: 1 });
-            this.shardDirs.push(nextDir);
-            this.activeShard = newIndex;
-            this.activeShardCount = 0;
-          }
-        });
-        return this.updateMutex;
-      }
-      /**
-       * Search: query each shard in turn, merge results, sort by score, filter by threshold, return top limit.
-       */
-      async search(queryVector, limit = 5, threshold = 0.5) {
-        const merged = [];
-        for (const dir of this.shardDirs) {
-          const shard = this.openShard(dir);
-          const results = await shard.queryItems(
-            queryVector,
-            "",
-            limit,
-            void 0,
-            false
-          );
-          for (const r of results) {
-            const m = r.item.metadata;
-            merged.push({
-              text: m?.text ?? "",
-              score: r.score,
-              filePath: m?.filePath ?? "",
-              fileName: m?.fileName ?? "",
-              chunkIndex: m?.chunkIndex ?? 0,
-              shardName: dir,
-              metadata: r.item.metadata ?? {}
-            });
-          }
-        }
-        return merged.filter((r) => r.score >= threshold).sort((a, b) => b.score - a.score).slice(0, limit);
-      }
-      /**
-       * Delete all chunks for a file (by hash) across all shards.
-       */
-      async deleteByFileHash(fileHash) {
-        const lastDir = this.shardDirs[this.shardDirs.length - 1];
-        this.updateMutex = this.updateMutex.then(async () => {
-          for (const dir of this.shardDirs) {
-            const shard = this.openShard(dir);
-            const items = await shard.listItems();
-            const toDelete = items.filter(
-              (i) => i.metadata?.fileHash === fileHash
-            );
-            if (toDelete.length > 0) {
-              await shard.beginUpdate();
-              for (const item of toDelete) {
-                await shard.deleteItem(item.id);
-              }
-              await shard.endUpdate();
-              if (dir === lastDir && this.activeShard) {
-                this.activeShardCount = (await this.activeShard.listItems()).length;
-              }
-            }
-          }
-          console.log(`Deleted chunks for file hash: ${fileHash}`);
-        });
-        return this.updateMutex;
-      }
-      /**
-       * Get file path -> set of file hashes currently in the store.
-       */
-      async getFileHashInventory() {
-        const inventory = /* @__PURE__ */ new Map();
-        for (const dir of this.shardDirs) {
-          const shard = this.openShard(dir);
-          const items = await shard.listItems();
-          for (const item of items) {
-            const m = item.metadata;
-            const filePath = m?.filePath;
-            const fileHash = m?.fileHash;
-            if (!filePath || !fileHash) continue;
-            let set = inventory.get(filePath);
-            if (!set) {
-              set = /* @__PURE__ */ new Set();
-              inventory.set(filePath, set);
-            }
-            set.add(fileHash);
-          }
-        }
-        return inventory;
-      }
-      /**
-       * Get total chunk count and unique file count.
-       */
-      async getStats() {
-        let totalChunks = 0;
-        const uniqueHashes = /* @__PURE__ */ new Set();
-        for (const dir of this.shardDirs) {
-          const shard = this.openShard(dir);
-          const items = await shard.listItems();
-          totalChunks += items.length;
-          for (const item of items) {
-            const h = item.metadata?.fileHash;
-            if (h) uniqueHashes.add(h);
-          }
-        }
-        return { totalChunks, uniqueFiles: uniqueHashes.size };
-      }
-      /**
-       * Check if any chunk exists for the given file hash (short-circuits on first match).
-       */
-      async hasFile(fileHash) {
-        for (const dir of this.shardDirs) {
-          const shard = this.openShard(dir);
-          const items = await shard.listItems();
-          if (items.some((i) => i.metadata?.fileHash === fileHash)) {
-            return true;
-          }
-        }
-        return false;
-      }
-      /**
-       * Release the active shard reference.
-       */
-      async close() {
-        this.activeShard = null;
-      }
-    };
-  }
-});
-
 // src/utils/sanityChecks.ts
 async function performSanityChecks(documentsDir, vectorStoreDir) {
   const warnings = [];
   const errors = [];
   try {
-    await fs2.promises.access(documentsDir, fs2.constants.R_OK);
+    await fs.promises.access(documentsDir, fs.constants.R_OK);
   } catch {
     errors.push(`Documents directory does not exist or is not readable: ${documentsDir}`);
   }
   try {
-    await fs2.promises.access(vectorStoreDir, fs2.constants.W_OK);
+    await fs.promises.access(vectorStoreDir, fs.constants.W_OK);
   } catch {
     try {
-      await fs2.promises.mkdir(vectorStoreDir, { recursive: true });
+      await fs.promises.mkdir(vectorStoreDir, { recursive: true });
     } catch {
       errors.push(
         `Vector store directory does not exist and cannot be created: ${vectorStoreDir}`
@@ -451,7 +230,7 @@ async function performSanityChecks(documentsDir, vectorStoreDir) {
     }
   }
   try {
-    const stats = await fs2.promises.statfs(vectorStoreDir);
+    const stats = await fs.promises.statfs(vectorStoreDir);
     const availableGB = stats.bavail * stats.bsize / (1024 * 1024 * 1024);
     if (availableGB < 1) {
       errors.push(`Very low disk space available: ${availableGB.toFixed(2)} GB`);
@@ -491,7 +270,7 @@ async function performSanityChecks(documentsDir, vectorStoreDir) {
     warnings.push("Could not estimate directory size");
   }
   try {
-    const files = await fs2.promises.readdir(vectorStoreDir);
+    const files = await fs.promises.readdir(vectorStoreDir);
     if (files.length > 0) {
       warnings.push(
         "Vector store directory is not empty. Existing data will be used for incremental indexing."
@@ -515,7 +294,7 @@ async function estimateDirectorySize(dir, maxSamples = 100) {
       return;
     }
     try {
-      const entries = await fs2.promises.readdir(currentDir, { withFileTypes: true });
+      const entries = await fs.promises.readdir(currentDir, { withFileTypes: true });
       for (const entry of entries) {
         if (sampledCount >= maxSamples) {
           break;
@@ -527,7 +306,7 @@ async function estimateDirectorySize(dir, maxSamples = 100) {
           fileCount++;
           if (sampledCount < maxSamples) {
             try {
-              const stats = await fs2.promises.stat(fullPath);
+              const stats = await fs.promises.stat(fullPath);
               sampledSize += stats.size;
               sampledCount++;
             } catch {
@@ -545,11 +324,11 @@ async function estimateDirectorySize(dir, maxSamples = 100) {
   }
   return totalSize;
 }
-var fs2, os;
+var fs, os;
 var init_sanityChecks = __esm({
   "src/utils/sanityChecks.ts"() {
     "use strict";
-    fs2 = __toESM(require("fs"));
+    fs = __toESM(require("fs"));
     os = __toESM(require("os"));
   }
 });
@@ -610,12 +389,12 @@ var init_coerceEmbedding = __esm({
 
 // src/utils/embeddingIndexManifest.ts
 function getEmbeddingManifestPath(vectorStoreDir) {
-  return path2.join(path2.resolve(vectorStoreDir), EMBEDDING_INDEX_MANIFEST_FILENAME);
+  return path.join(path.resolve(vectorStoreDir), EMBEDDING_INDEX_MANIFEST_FILENAME);
 }
 async function readEmbeddingIndexManifest(vectorStoreDir) {
   const filePath = getEmbeddingManifestPath(vectorStoreDir);
   try {
-    const raw = await fs3.readFile(filePath, "utf-8");
+    const raw = await fs2.readFile(filePath, "utf-8");
     const data = JSON.parse(raw);
     if (typeof data.embeddingModelId === "string" && data.embeddingModelId.length > 0 && typeof data.dimensions === "number" && Number.isFinite(data.dimensions) && data.dimensions > 0) {
       return { embeddingModelId: data.embeddingModelId, dimensions: data.dimensions };
@@ -631,13 +410,13 @@ async function readEmbeddingIndexManifest(vectorStoreDir) {
 }
 async function writeEmbeddingIndexManifest(vectorStoreDir, manifest) {
   const filePath = getEmbeddingManifestPath(vectorStoreDir);
-  await fs3.mkdir(path2.dirname(filePath), { recursive: true });
-  await fs3.writeFile(filePath, JSON.stringify(manifest, null, 2), "utf-8");
+  await fs2.mkdir(path.dirname(filePath), { recursive: true });
+  await fs2.writeFile(filePath, JSON.stringify(manifest, null, 2), "utf-8");
 }
 async function deleteEmbeddingIndexManifest(vectorStoreDir) {
   const filePath = getEmbeddingManifestPath(vectorStoreDir);
   try {
-    await fs3.unlink(filePath);
+    await fs2.unlink(filePath);
   } catch (e) {
     if (e?.code !== "ENOENT") {
       console.warn("[BigRAG] Could not delete embedding index manifest:", e);
@@ -664,7 +443,7 @@ async function checkEmbeddingModelForRetrieval(args) {
   }
   const manifest = await readEmbeddingIndexManifest(vectorStoreDir);
   if (!manifest) {
-    const key = path2.resolve(vectorStoreDir);
+    const key = path.resolve(vectorStoreDir);
     if (!legacyWarnedDirs.has(key)) {
       legacyWarnedDirs.add(key);
       console.warn(
@@ -693,12 +472,12 @@ async function checkEmbeddingModelForRetrieval(args) {
   }
   return { ok: true };
 }
-var fs3, path2, EMBEDDING_INDEX_MANIFEST_FILENAME, legacyWarnedDirs;
+var fs2, path, EMBEDDING_INDEX_MANIFEST_FILENAME, legacyWarnedDirs;
 var init_embeddingIndexManifest = __esm({
   "src/utils/embeddingIndexManifest.ts"() {
     "use strict";
-    fs3 = __toESM(require("fs/promises"));
-    path2 = __toESM(require("path"));
+    fs2 = __toESM(require("fs/promises"));
+    path = __toESM(require("path"));
     init_coerceEmbedding();
     EMBEDDING_INDEX_MANIFEST_FILENAME = ".big-rag-embedding.json";
     legacyWarnedDirs = /* @__PURE__ */ new Set();
@@ -784,19 +563,195 @@ var init_fileExcludePatterns = __esm({
   }
 });
 
+// src/utils/additionalExtensions.ts
+function parseAdditionalExtensionsBlock(text) {
+  const tokens = [];
+  for (const rawLine of text.split(/\r?\n/)) {
+    const trimmedLine = rawLine.trim();
+    if (trimmedLine === "" || trimmedLine.startsWith("#")) {
+      continue;
+    }
+    for (const part of trimmedLine.split(",")) {
+      const token = stripInlineComment(part);
+      if (token === "") {
+        continue;
+      }
+      tokens.push(token);
+    }
+  }
+  return tokens;
+}
+function stripInlineComment(token) {
+  const hashIndex = token.indexOf("#");
+  if (hashIndex === -1) {
+    return token.trim();
+  }
+  return token.slice(0, hashIndex).trim();
+}
+function normalizeExtension(raw) {
+  const trimmed = raw.trim().toLowerCase();
+  if (trimmed === "") {
+    return null;
+  }
+  if (trimmed.includes("*") || trimmed.includes("?")) {
+    return null;
+  }
+  const normalized = trimmed.startsWith(".") ? trimmed : `.${trimmed}`;
+  if (normalized.length < 2 || normalized.includes("/") || normalized.includes("\\")) {
+    return null;
+  }
+  return normalized;
+}
+function buildEffectiveExtensionSet(additionalPlainTextExtensions) {
+  const effective = new Set(SUPPORTED_EXTENSIONS);
+  for (const ext of additionalPlainTextExtensions) {
+    effective.add(ext.toLowerCase());
+  }
+  return effective;
+}
+function isAdditionalPlainTextExtension(ext, additionalPlainTextSet) {
+  return additionalPlainTextSet.has(ext.toLowerCase());
+}
+function resolveAdditionalExtensions(raw, log) {
+  const accepted = [];
+  const rejected = [];
+  const warnings = [];
+  const additionalPlainTextSet = /* @__PURE__ */ new Set();
+  const seen = /* @__PURE__ */ new Set();
+  for (const token of parseAdditionalExtensionsBlock(raw)) {
+    const normalized = normalizeExtension(token);
+    if (normalized === null) {
+      rejected.push({
+        ext: token,
+        reason: "Invalid extension format (use values like .java; wildcards are not allowed)"
+      });
+      continue;
+    }
+    if (seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    if (BLOCKED_BINARY_EXTENSIONS.has(normalized)) {
+      rejected.push({
+        ext: normalized,
+        reason: "Binary or non-plain-text extension is not allowed"
+      });
+      continue;
+    }
+    if (SUPPORTED_EXTENSIONS.has(normalized)) {
+      if (BUILTIN_NON_PLAINTEXT_EXTENSIONS.has(normalized)) {
+        const warning2 = `Extension ${normalized} is already handled by a built-in parser; ignoring additional declaration.`;
+        warnings.push(warning2);
+        log?.(`[BigRAG] ${warning2}`);
+        continue;
+      }
+      const warning = `Extension ${normalized} is already included in built-in supported types; no need to declare it again.`;
+      warnings.push(warning);
+      log?.(`[BigRAG] ${warning}`);
+      continue;
+    }
+    accepted.push(normalized);
+    additionalPlainTextSet.add(normalized);
+  }
+  for (const item of rejected) {
+    log?.(`[BigRAG] Rejected additional extension ${item.ext}: ${item.reason}`);
+  }
+  return {
+    accepted,
+    additionalPlainTextSet,
+    rejected,
+    warnings
+  };
+}
+var BLOCKED_BINARY_EXTENSIONS, BUILTIN_NON_PLAINTEXT_EXTENSIONS;
+var init_additionalExtensions = __esm({
+  "src/utils/additionalExtensions.ts"() {
+    "use strict";
+    init_supportedExtensions();
+    BLOCKED_BINARY_EXTENSIONS = new Set(
+      [
+        ".exe",
+        ".dll",
+        ".so",
+        ".dylib",
+        ".zip",
+        ".tar",
+        ".gz",
+        ".tgz",
+        ".bz2",
+        ".xz",
+        ".7z",
+        ".rar",
+        ".wasm",
+        ".bin",
+        ".dmg",
+        ".iso",
+        ".deb",
+        ".rpm",
+        ".msi",
+        ".apk",
+        ".ipa",
+        ".class",
+        ".jar",
+        ".war",
+        ".ear",
+        ".pyc",
+        ".pyo",
+        ".o",
+        ".obj",
+        ".a",
+        ".lib",
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".otf",
+        ".eot",
+        ".ico",
+        ".webp",
+        ".gif",
+        ".mp3",
+        ".mp4",
+        ".avi",
+        ".mov",
+        ".mkv",
+        ".wav",
+        ".flac",
+        ".sqlite",
+        ".db",
+        ".doc",
+        ".docx",
+        ".ppt",
+        ".pptx",
+        ".xls",
+        ".xlsx",
+        ".odt",
+        ".ods",
+        ".odp"
+      ].map((ext) => ext.toLowerCase())
+    );
+    BUILTIN_NON_PLAINTEXT_EXTENSIONS = new Set(
+      [".htm", ".html", ".xhtml", ".pdf", ".epub", ".bmp", ".jpg", ".jpeg", ".png", ".rar"].map(
+        (ext) => ext.toLowerCase()
+      )
+    );
+  }
+});
+
 // src/ingestion/fileScanner.ts
 function normalizeRootDir(rootDir) {
-  return path3.resolve(rootDir.trim()).replace(/[/\\]+$/, "");
+  return path2.resolve(rootDir.trim()).replace(/[/\\]+$/, "");
 }
 function toPosixRelativePath(root, fullPath) {
-  return path3.relative(root, fullPath).split(path3.sep).join("/");
+  return path2.relative(root, fullPath).split(path2.sep).join("/");
 }
 async function scanDirectory(rootDir, onProgress, options) {
   const root = normalizeRootDir(rootDir);
   const excludePatterns = options?.excludePatterns ?? [];
+  const additionalPlainTextExtensions = options?.additionalPlainTextExtensions ?? /* @__PURE__ */ new Set();
   const onExcludedFile = options?.onExcludedFile;
+  const effectiveExtensions = buildEffectiveExtensionSet(additionalPlainTextExtensions);
   try {
-    await fs4.promises.access(root, fs4.constants.R_OK);
+    await fs3.promises.access(root, fs3.constants.R_OK);
   } catch (err) {
     if (err?.code === "ENOENT") {
       throw new Error(
@@ -808,24 +763,28 @@ async function scanDirectory(rootDir, onProgress, options) {
   const files = [];
   let scannedCount = 0;
   const supportedExtensionsDescription = listSupportedExtensions().join(", ");
-  console.log(`[Scanner] Supported extensions: ${supportedExtensionsDescription}`);
+  console.log(`[Scanner] Built-in extensions: ${supportedExtensionsDescription}`);
+  if (additionalPlainTextExtensions.size > 0) {
+    const additionalList = Array.from(additionalPlainTextExtensions.values()).sort().join(", ");
+    console.log(`[Scanner] Additional plain-text extensions: ${additionalList}`);
+  }
   async function walk(dir) {
     try {
-      const entries = await fs4.promises.readdir(dir, { withFileTypes: true });
+      const entries = await fs3.promises.readdir(dir, { withFileTypes: true });
       for (const entry of entries) {
-        const fullPath = path3.join(dir, entry.name);
+        const fullPath = path2.join(dir, entry.name);
         if (entry.isDirectory()) {
           await walk(fullPath);
         } else if (entry.isFile()) {
           scannedCount++;
-          const ext = path3.extname(entry.name).toLowerCase();
-          if (SUPPORTED_EXTENSIONS.has(ext)) {
+          const ext = path2.extname(entry.name).toLowerCase();
+          if (effectiveExtensions.has(ext)) {
             const relativePosix = toPosixRelativePath(root, fullPath);
             const matchedPattern = excludePatterns.length > 0 ? matchExcludePattern(relativePosix, excludePatterns) : null;
             if (matchedPattern !== null) {
               onExcludedFile?.({ relativePath: relativePosix, pattern: matchedPattern });
             } else {
-              const stats = await fs4.promises.stat(fullPath);
+              const stats = await fs3.promises.stat(fullPath);
               const mimeType = mime.lookup(fullPath);
               files.push({
                 path: fullPath,
@@ -852,22 +811,23 @@ async function scanDirectory(rootDir, onProgress, options) {
   }
   return files;
 }
-var fs4, path3, mime;
+var fs3, path2, mime;
 var init_fileScanner = __esm({
   "src/ingestion/fileScanner.ts"() {
     "use strict";
-    fs4 = __toESM(require("fs"));
-    path3 = __toESM(require("path"));
+    fs3 = __toESM(require("fs"));
+    path2 = __toESM(require("path"));
     mime = __toESM(require("mime-types"));
     init_supportedExtensions();
     init_fileExcludePatterns();
+    init_additionalExtensions();
   }
 });
 
 // src/parsers/htmlParser.ts
 async function parseHTML(filePath) {
   try {
-    const content = await fs5.promises.readFile(filePath, "utf-8");
+    const content = await fs4.promises.readFile(filePath, "utf-8");
     const $ = cheerio.load(content);
     $("script, style, noscript").remove();
     const text = $("body").text() || $.text();
@@ -877,12 +837,12 @@ async function parseHTML(filePath) {
     return "";
   }
 }
-var cheerio, fs5;
+var cheerio, fs4;
 var init_htmlParser = __esm({
   "src/parsers/htmlParser.ts"() {
     "use strict";
     cheerio = __toESM(require("cheerio"));
-    fs5 = __toESM(require("fs"));
+    fs4 = __toESM(require("fs"));
   }
 });
 
@@ -933,7 +893,7 @@ async function tryLmStudioParser(filePath, client2) {
         console.warn(
           `[PDF Parser] (LM Studio) WebSocket error on ${fileName}, retrying (${attempt}/${maxRetries})...`
         );
-        await new Promise((resolve4) => setTimeout(resolve4, 1e3 * attempt));
+        await new Promise((resolve5) => setTimeout(resolve5, 1e3 * attempt));
         continue;
       }
       console.error(`[PDF Parser] (LM Studio) Error parsing PDF file ${filePath}:`, error);
@@ -953,7 +913,7 @@ async function tryLmStudioParser(filePath, client2) {
 async function tryPdfParse(filePath) {
   const fileName = filePath.split("/").pop() || filePath;
   try {
-    const buffer = await fs6.promises.readFile(filePath);
+    const buffer = await fs5.promises.readFile(filePath);
     const result = await (0, import_pdf_parse.default)(buffer);
     const cleaned = cleanText(result.text || "");
     if (cleaned.length >= MIN_TEXT_LENGTH) {
@@ -986,7 +946,7 @@ async function tryOcrWithPdfJs(filePath) {
   let worker = null;
   try {
     const pdfjsLib = await getPdfjsLib();
-    const data = new Uint8Array(await fs6.promises.readFile(filePath));
+    const data = new Uint8Array(await fs5.promises.readFile(filePath));
     const pdfDocument = await pdfjsLib.getDocument({ data, verbosity: pdfjsLib.VerbosityLevel.ERRORS }).promise;
     const numPages = pdfDocument.numPages;
     const maxPages = Math.min(numPages, OCR_MAX_PAGES);
@@ -1263,11 +1223,11 @@ async function parsePDF(filePath, client2, enableOCR) {
   }
   return ocrResult;
 }
-var fs6, import_pdf_parse, import_tesseract, import_pngjs, MIN_TEXT_LENGTH, OCR_MAX_PAGES, OCR_MAX_IMAGES_PER_PAGE, OCR_MIN_IMAGE_AREA, OCR_MAX_IMAGE_PIXELS, OCR_IMAGE_TIMEOUT_MS, ImageDataTimeoutError, cachedPdfjsLib;
+var fs5, import_pdf_parse, import_tesseract, import_pngjs, MIN_TEXT_LENGTH, OCR_MAX_PAGES, OCR_MAX_IMAGES_PER_PAGE, OCR_MIN_IMAGE_AREA, OCR_MAX_IMAGE_PIXELS, OCR_IMAGE_TIMEOUT_MS, ImageDataTimeoutError, cachedPdfjsLib;
 var init_pdfParser = __esm({
   "src/parsers/pdfParser.ts"() {
     "use strict";
-    fs6 = __toESM(require("fs"));
+    fs5 = __toESM(require("fs"));
     import_pdf_parse = __toESM(require("pdf-parse"));
     import_tesseract = require("tesseract.js");
     import_pngjs = require("pngjs");
@@ -1289,12 +1249,12 @@ var init_pdfParser = __esm({
 
 // src/parsers/epubParser.ts
 async function parseEPUB(filePath) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     try {
       const epub = new import_epub2.EPub(filePath);
       epub.on("error", (error) => {
         console.error(`Error parsing EPUB file ${filePath}:`, error);
-        resolve4("");
+        resolve5("");
       });
       const stripHtml = (input) => input.replace(/<[^>]*>/g, " ");
       const getManifestEntry = (chapterId) => {
@@ -1374,18 +1334,18 @@ async function parseEPUB(filePath) {
             }
           }
           const fullText = textParts.join("\n\n");
-          resolve4(
+          resolve5(
             fullText.replace(/\s+/g, " ").replace(/\n+/g, "\n").trim()
           );
         } catch (error) {
           console.error(`Error processing EPUB chapters:`, error);
-          resolve4("");
+          resolve5("");
         }
       });
       epub.parse();
     } catch (error) {
       console.error(`Error initializing EPUB parser for ${filePath}:`, error);
-      resolve4("");
+      resolve5("");
     }
   });
 }
@@ -1421,7 +1381,7 @@ var init_imageParser = __esm({
 async function parseText(filePath, options = {}) {
   const { stripMarkdown = false, preserveLineBreaks = false } = options;
   try {
-    const content = await fs7.promises.readFile(filePath, "utf-8");
+    const content = await fs6.promises.readFile(filePath, "utf-8");
     const normalized = normalizeLineEndings(content);
     const stripped = stripMarkdown ? stripMarkdownSyntax(normalized) : normalized;
     return (preserveLineBreaks ? collapseWhitespaceButKeepLines(stripped) : collapseWhitespace(stripped)).trim();
@@ -1455,18 +1415,18 @@ function stripMarkdownSyntax(input) {
   output = output.replace(/<[^>]+>/g, " ");
   return output;
 }
-var fs7;
+var fs6;
 var init_textParser = __esm({
   "src/parsers/textParser.ts"() {
     "use strict";
-    fs7 = __toESM(require("fs"));
+    fs6 = __toESM(require("fs"));
   }
 });
 
 // src/parsers/documentParser.ts
-async function parseDocument(filePath, enableOCR = false, client2) {
-  const ext = path4.extname(filePath).toLowerCase();
-  const fileName = path4.basename(filePath);
+async function parseDocument(filePath, enableOCR = false, client2, additionalPlainTextExtensions = /* @__PURE__ */ new Set()) {
+  const ext = path3.extname(filePath).toLowerCase();
+  const fileName = path3.basename(filePath);
   const buildSuccess = (text) => ({
     success: true,
     document: {
@@ -1552,6 +1512,23 @@ async function parseDocument(filePath, enableOCR = false, client2) {
       console.log(`RAR files not yet supported: ${filePath}`);
       return { success: false, reason: "unsupported-extension", details: ".rar" };
     }
+    if (isAdditionalPlainTextExtension(ext, additionalPlainTextExtensions)) {
+      try {
+        const text = await parseText(filePath, {
+          stripMarkdown: false,
+          preserveLineBreaks: true
+        });
+        const cleaned = cleanAndValidate(text, "text.empty", fileName);
+        return cleaned.success ? buildSuccess(cleaned.value) : cleaned;
+      } catch (error) {
+        console.error(`[Parser][AdditionalPlainText] Error parsing ${filePath}:`, error);
+        return {
+          success: false,
+          reason: "text.error",
+          details: error instanceof Error ? error.message : String(error)
+        };
+      }
+    }
     console.log(`Unsupported file type: ${filePath}`);
     return { success: false, reason: "unsupported-extension", details: ext };
   } catch (error) {
@@ -1574,17 +1551,18 @@ function cleanAndValidate(text, emptyReason, detailsContext) {
   }
   return { success: true, value: cleaned };
 }
-var path4;
+var path3;
 var init_documentParser = __esm({
   "src/parsers/documentParser.ts"() {
     "use strict";
-    path4 = __toESM(require("path"));
+    path3 = __toESM(require("path"));
     init_htmlParser();
     init_pdfParser();
     init_epubParser();
     init_imageParser();
     init_textParser();
     init_supportedExtensions();
+    init_additionalExtensions();
   }
 });
 
@@ -1620,30 +1598,30 @@ var init_textChunker = __esm({
 
 // src/utils/fileHash.ts
 async function calculateFileHash(filePath) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     const hash = crypto.createHash("sha256");
-    const stream = fs8.createReadStream(filePath);
+    const stream = fs7.createReadStream(filePath);
     stream.on("data", (data) => hash.update(data));
-    stream.on("end", () => resolve4(hash.digest("hex")));
+    stream.on("end", () => resolve5(hash.digest("hex")));
     stream.on("error", reject);
   });
 }
-var crypto, fs8;
+var crypto, fs7;
 var init_fileHash = __esm({
   "src/utils/fileHash.ts"() {
     "use strict";
     crypto = __toESM(require("crypto"));
-    fs8 = __toESM(require("fs"));
+    fs7 = __toESM(require("fs"));
   }
 });
 
 // src/utils/failedFileRegistry.ts
-var fs9, path5, FailedFileRegistry;
+var fs8, path4, FailedFileRegistry;
 var init_failedFileRegistry = __esm({
   "src/utils/failedFileRegistry.ts"() {
     "use strict";
-    fs9 = __toESM(require("fs/promises"));
-    path5 = __toESM(require("path"));
+    fs8 = __toESM(require("fs/promises"));
+    path4 = __toESM(require("path"));
     FailedFileRegistry = class {
       constructor(registryPath) {
         this.registryPath = registryPath;
@@ -1656,7 +1634,7 @@ var init_failedFileRegistry = __esm({
           return;
         }
         try {
-          const data = await fs9.readFile(this.registryPath, "utf-8");
+          const data = await fs8.readFile(this.registryPath, "utf-8");
           this.entries = JSON.parse(data) ?? {};
         } catch {
           this.entries = {};
@@ -1664,8 +1642,8 @@ var init_failedFileRegistry = __esm({
         this.loaded = true;
       }
       async persist() {
-        await fs9.mkdir(path5.dirname(this.registryPath), { recursive: true });
-        await fs9.writeFile(this.registryPath, JSON.stringify(this.entries, null, 2), "utf-8");
+        await fs8.mkdir(path4.dirname(this.registryPath), { recursive: true });
+        await fs8.writeFile(this.registryPath, JSON.stringify(this.entries, null, 2), "utf-8");
       }
       runExclusive(operation) {
         const result = this.queue.then(operation);
@@ -1710,13 +1688,13 @@ var init_failedFileRegistry = __esm({
 });
 
 // src/ingestion/indexManager.ts
-var import_p_queue, fs10, path6, EXCLUDE_PROGRESS_THROTTLE, IndexManager;
+var import_p_queue, fs9, path5, EXCLUDE_PROGRESS_THROTTLE, IndexManager;
 var init_indexManager = __esm({
   "src/ingestion/indexManager.ts"() {
     "use strict";
     import_p_queue = __toESM(require("p-queue"));
-    fs10 = __toESM(require("fs"));
-    path6 = __toESM(require("path"));
+    fs9 = __toESM(require("fs"));
+    path5 = __toESM(require("path"));
     init_fileScanner();
     init_documentParser();
     init_textChunker();
@@ -1730,16 +1708,16 @@ var init_indexManager = __esm({
         this.options = options;
         this.queue = new import_p_queue.default({ concurrency: options.maxConcurrent });
         this.failedFileRegistry = new FailedFileRegistry(
-          path6.join(options.vectorStoreDir, ".big-rag-failures.json")
+          path5.join(options.vectorStoreDir, ".big-rag-failures.json")
         );
       }
       /**
        * Start the indexing process
        */
       async index() {
-        const { documentsDir, vectorStore: vectorStore2, onProgress } = this.options;
+        const { documentsDir, vectorStore, onProgress } = this.options;
         try {
-          const fileInventory = await vectorStore2.getFileHashInventory();
+          const fileInventory = await vectorStore.getFileHashInventory();
           if (onProgress) {
             onProgress({
               totalFiles: 0,
@@ -1785,6 +1763,7 @@ var init_indexManager = __esm({
             },
             {
               excludePatterns,
+              additionalPlainTextExtensions: this.options.additionalPlainTextExtensions,
               onExcludedFile
             }
           );
@@ -1928,7 +1907,7 @@ var init_indexManager = __esm({
        * Index a single file
        */
       async indexFile(file, fileInventory = /* @__PURE__ */ new Map()) {
-        const { vectorStore: vectorStore2, embeddingModel, client: client2, chunkSize, chunkOverlap, enableOCR, autoReindex } = this.options;
+        const { vectorStore, embeddingModel, client: client2, chunkSize, chunkOverlap, enableOCR, autoReindex } = this.options;
         let fileHash;
         try {
           fileHash = await calculateFileHash(file.path);
@@ -1949,9 +1928,14 @@ var init_indexManager = __esm({
             }
           }
           if (this.options.parseDelayMs > 0) {
-            await new Promise((resolve4) => setTimeout(resolve4, this.options.parseDelayMs));
+            await new Promise((resolve5) => setTimeout(resolve5, this.options.parseDelayMs));
           }
-          const parsedResult = await parseDocument(file.path, enableOCR, client2);
+          const parsedResult = await parseDocument(
+            file.path,
+            enableOCR,
+            client2,
+            this.options.additionalPlainTextExtensions ?? /* @__PURE__ */ new Set()
+          );
           if (!parsedResult.success) {
             this.recordFailure(parsedResult.reason, parsedResult.details, file);
             if (fileHash) {
@@ -2008,7 +1992,7 @@ var init_indexManager = __esm({
             return { type: "failed" };
           }
           try {
-            await vectorStore2.addChunks(documentChunks);
+            await vectorStore.addChunks(documentChunks);
             console.log(`Indexed ${documentChunks.length} chunks from ${file.name}`);
             if (!existingHashes) {
               fileInventory.set(file.path, /* @__PURE__ */ new Set([fileHash]));
@@ -2049,10 +2033,10 @@ var init_indexManager = __esm({
        * Reindex a specific file (delete old chunks and reindex)
        */
       async reindexFile(filePath) {
-        const { vectorStore: vectorStore2 } = this.options;
+        const { vectorStore } = this.options;
         try {
           const fileHash = await calculateFileHash(filePath);
-          await vectorStore2.deleteByFileHash(fileHash);
+          await vectorStore.deleteByFileHash(fileHash);
           const file = {
             path: filePath,
             name: filePath.split("/").pop() || filePath,
@@ -2098,12 +2082,243 @@ var init_indexManager = __esm({
           generatedAt: (/* @__PURE__ */ new Date()).toISOString()
         };
         try {
-          await fs10.promises.mkdir(path6.dirname(reportPath), { recursive: true });
-          await fs10.promises.writeFile(reportPath, JSON.stringify(payload, null, 2), "utf-8");
+          await fs9.promises.mkdir(path5.dirname(reportPath), { recursive: true });
+          await fs9.promises.writeFile(reportPath, JSON.stringify(payload, null, 2), "utf-8");
           console.log(`[BigRAG] Wrote failure report to ${reportPath}`);
         } catch (error) {
           console.error(`[BigRAG] Failed to write failure report to ${reportPath}:`, error);
         }
+      }
+    };
+  }
+});
+
+// src/vectorstore/vectorStore.ts
+var fs10, path6, import_vectra, MAX_ITEMS_PER_SHARD, SHARD_DIR_PREFIX, SHARD_DIR_REGEX, VectorStore;
+var init_vectorStore = __esm({
+  "src/vectorstore/vectorStore.ts"() {
+    "use strict";
+    fs10 = __toESM(require("fs/promises"));
+    path6 = __toESM(require("path"));
+    import_vectra = require("vectra");
+    MAX_ITEMS_PER_SHARD = 1e4;
+    SHARD_DIR_PREFIX = "shard_";
+    SHARD_DIR_REGEX = /^shard_(\d+)$/;
+    VectorStore = class {
+      constructor(dbPath) {
+        this.shardDirs = [];
+        this.activeShard = null;
+        this.activeShardCount = 0;
+        this.updateMutex = Promise.resolve();
+        this.dbPath = path6.resolve(dbPath);
+      }
+      /**
+       * Open a shard by directory name (e.g. "shard_000"). Caller must not hold the reference
+       * after use so GC can free the parsed index data.
+       */
+      openShard(dir) {
+        const fullPath = path6.join(this.dbPath, dir);
+        return new import_vectra.LocalIndex(fullPath);
+      }
+      /**
+       * Scan dbPath for shard_NNN directories and return sorted list.
+       */
+      async discoverShardDirs() {
+        const entries = await fs10.readdir(this.dbPath, { withFileTypes: true });
+        const dirs = [];
+        for (const e of entries) {
+          if (e.isDirectory() && SHARD_DIR_REGEX.test(e.name)) {
+            dirs.push(e.name);
+          }
+        }
+        dirs.sort((a, b) => {
+          const n = (m) => parseInt(m.match(SHARD_DIR_REGEX)[1], 10);
+          return n(a) - n(b);
+        });
+        return dirs;
+      }
+      /**
+       * Initialize the vector store: discover or create shards, open the last as active.
+       */
+      async initialize() {
+        await fs10.mkdir(this.dbPath, { recursive: true });
+        this.shardDirs = await this.discoverShardDirs();
+        if (this.shardDirs.length === 0) {
+          const firstDir = `${SHARD_DIR_PREFIX}000`;
+          const fullPath = path6.join(this.dbPath, firstDir);
+          const index = new import_vectra.LocalIndex(fullPath);
+          await index.createIndex({ version: 1 });
+          this.shardDirs = [firstDir];
+          this.activeShard = index;
+          this.activeShardCount = 0;
+        } else {
+          const lastDir = this.shardDirs[this.shardDirs.length - 1];
+          this.activeShard = this.openShard(lastDir);
+          const items = await this.activeShard.listItems();
+          this.activeShardCount = items.length;
+        }
+        console.log("Vector store initialized successfully");
+      }
+      /**
+       * Add document chunks to the active shard. Rotates to a new shard when full.
+       */
+      async addChunks(chunks) {
+        if (!this.activeShard) {
+          throw new Error("Vector store not initialized");
+        }
+        if (chunks.length === 0) return;
+        this.updateMutex = this.updateMutex.then(async () => {
+          await this.activeShard.beginUpdate();
+          try {
+            for (const chunk of chunks) {
+              const metadata = {
+                text: chunk.text,
+                filePath: chunk.filePath,
+                fileName: chunk.fileName,
+                fileHash: chunk.fileHash,
+                chunkIndex: chunk.chunkIndex,
+                ...chunk.metadata
+              };
+              await this.activeShard.upsertItem({
+                id: chunk.id,
+                vector: chunk.vector,
+                metadata
+              });
+            }
+            await this.activeShard.endUpdate();
+          } catch (e) {
+            this.activeShard.cancelUpdate();
+            throw e;
+          }
+          this.activeShardCount += chunks.length;
+          console.log(`Added ${chunks.length} chunks to vector store`);
+          if (this.activeShardCount >= MAX_ITEMS_PER_SHARD) {
+            const nextNum = this.shardDirs.length;
+            const nextDir = `${SHARD_DIR_PREFIX}${String(nextNum).padStart(3, "0")}`;
+            const fullPath = path6.join(this.dbPath, nextDir);
+            const newIndex = new import_vectra.LocalIndex(fullPath);
+            await newIndex.createIndex({ version: 1 });
+            this.shardDirs.push(nextDir);
+            this.activeShard = newIndex;
+            this.activeShardCount = 0;
+          }
+        });
+        return this.updateMutex;
+      }
+      /**
+       * Search: query each shard in turn, merge results, sort by score, filter by threshold, return top limit.
+       */
+      async search(queryVector, limit = 5, threshold = 0.5) {
+        const merged = [];
+        for (const dir of this.shardDirs) {
+          const shard = this.openShard(dir);
+          const results = await shard.queryItems(
+            queryVector,
+            "",
+            limit,
+            void 0,
+            false
+          );
+          for (const r of results) {
+            const m = r.item.metadata;
+            merged.push({
+              text: m?.text ?? "",
+              score: r.score,
+              filePath: m?.filePath ?? "",
+              fileName: m?.fileName ?? "",
+              chunkIndex: m?.chunkIndex ?? 0,
+              shardName: dir,
+              metadata: r.item.metadata ?? {}
+            });
+          }
+        }
+        return merged.filter((r) => r.score >= threshold).sort((a, b) => b.score - a.score).slice(0, limit);
+      }
+      /**
+       * Delete all chunks for a file (by hash) across all shards.
+       */
+      async deleteByFileHash(fileHash) {
+        const lastDir = this.shardDirs[this.shardDirs.length - 1];
+        this.updateMutex = this.updateMutex.then(async () => {
+          for (const dir of this.shardDirs) {
+            const shard = this.openShard(dir);
+            const items = await shard.listItems();
+            const toDelete = items.filter(
+              (i) => i.metadata?.fileHash === fileHash
+            );
+            if (toDelete.length > 0) {
+              await shard.beginUpdate();
+              for (const item of toDelete) {
+                await shard.deleteItem(item.id);
+              }
+              await shard.endUpdate();
+              if (dir === lastDir && this.activeShard) {
+                this.activeShardCount = (await this.activeShard.listItems()).length;
+              }
+            }
+          }
+          console.log(`Deleted chunks for file hash: ${fileHash}`);
+        });
+        return this.updateMutex;
+      }
+      /**
+       * Get file path -> set of file hashes currently in the store.
+       */
+      async getFileHashInventory() {
+        const inventory = /* @__PURE__ */ new Map();
+        for (const dir of this.shardDirs) {
+          const shard = this.openShard(dir);
+          const items = await shard.listItems();
+          for (const item of items) {
+            const m = item.metadata;
+            const filePath = m?.filePath;
+            const fileHash = m?.fileHash;
+            if (!filePath || !fileHash) continue;
+            let set = inventory.get(filePath);
+            if (!set) {
+              set = /* @__PURE__ */ new Set();
+              inventory.set(filePath, set);
+            }
+            set.add(fileHash);
+          }
+        }
+        return inventory;
+      }
+      /**
+       * Get total chunk count and unique file count.
+       */
+      async getStats() {
+        let totalChunks = 0;
+        const uniqueHashes = /* @__PURE__ */ new Set();
+        for (const dir of this.shardDirs) {
+          const shard = this.openShard(dir);
+          const items = await shard.listItems();
+          totalChunks += items.length;
+          for (const item of items) {
+            const h = item.metadata?.fileHash;
+            if (h) uniqueHashes.add(h);
+          }
+        }
+        return { totalChunks, uniqueFiles: uniqueHashes.size };
+      }
+      /**
+       * Check if any chunk exists for the given file hash (short-circuits on first match).
+       */
+      async hasFile(fileHash) {
+        for (const dir of this.shardDirs) {
+          const shard = this.openShard(dir);
+          const items = await shard.listItems();
+          if (items.some((i) => i.metadata?.fileHash === fileHash)) {
+            return true;
+          }
+        }
+        return false;
+      }
+      /**
+       * Release the active shard reference.
+       */
+      async close() {
+        this.activeShard = null;
       }
     };
   }
@@ -2123,20 +2338,21 @@ async function runIndexingJob({
   autoReindex,
   parseDelayMs,
   excludePatterns = [],
+  additionalPlainTextExtensions = /* @__PURE__ */ new Set(),
   forceReindex = false,
   vectorStore: existingVectorStore,
   onProgress
 }) {
-  const vectorStore2 = existingVectorStore ?? new VectorStore(vectorStoreDir);
+  const vectorStore = existingVectorStore ?? new VectorStore(vectorStoreDir);
   const ownsVectorStore = existingVectorStore === void 0;
   if (ownsVectorStore) {
-    await vectorStore2.initialize();
+    await vectorStore.initialize();
   }
   const resolvedModelId = resolveEmbeddingModelId(embeddingModelId);
   const embeddingModel = await client2.embedding.model(resolvedModelId, { signal: abortSignal });
   const indexManager = new IndexManager({
     documentsDir,
-    vectorStore: vectorStore2,
+    vectorStore,
     vectorStoreDir,
     embeddingModel,
     client: client2,
@@ -2147,11 +2363,12 @@ async function runIndexingJob({
     autoReindex: forceReindex ? false : autoReindex,
     parseDelayMs,
     excludePatterns,
+    additionalPlainTextExtensions,
     abortSignal,
     onProgress
   });
   const indexingResult = await indexManager.index();
-  const stats = await vectorStore2.getStats();
+  const stats = await vectorStore.getStats();
   await syncEmbeddingManifestAfterIndexing(
     vectorStoreDir,
     stats.totalChunks,
@@ -2159,7 +2376,7 @@ async function runIndexingJob({
     embeddingModel
   );
   if (ownsVectorStore) {
-    await vectorStore2.close();
+    await vectorStore.close();
   }
   const summary = `Indexing completed!
 
@@ -2186,6 +2403,363 @@ var init_runIndexing = __esm({
   }
 });
 
+// src/utils/effectivePluginConfig.ts
+function pickNonEmptyString(primary, fallback) {
+  const trimmedPrimary = (primary ?? "").trim();
+  if (trimmedPrimary !== "") {
+    return trimmedPrimary;
+  }
+  return (fallback ?? "").trim();
+}
+function chatPathsConfigured(chatConfig) {
+  return pickNonEmptyString(chatConfig.get("documentsDirectory"), "") !== "" || pickNonEmptyString(chatConfig.get("vectorStoreDirectory"), "") !== "";
+}
+function pickFirstNonEmptyString(...values) {
+  for (const value of values) {
+    const trimmed = (value ?? "").trim();
+    if (trimmed !== "") {
+      return trimmed;
+    }
+  }
+  return "";
+}
+function pickNumericSetting(...values) {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+  }
+  return DEFAULT_RETRIEVAL_LIMIT;
+}
+function pickThresholdSetting(...values) {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+  }
+  return DEFAULT_RETRIEVAL_AFFINITY_THRESHOLD;
+}
+function resolveBigRagToolsConfigPath() {
+  return (0, import_node_path.join)((0, import_node_os.homedir)(), ".lmstudio", BIG_RAG_TOOLS_CONFIG_FILENAME);
+}
+function extractToolsSettingsFromChatConfig(chatConfig) {
+  return {
+    documentsDirectory: pickNonEmptyString(chatConfig.get("documentsDirectory"), ""),
+    vectorStoreDirectory: pickNonEmptyString(chatConfig.get("vectorStoreDirectory"), ""),
+    embeddingModel: resolveEmbeddingModelId(chatConfig.get("embeddingModel")),
+    retrievalLimit: chatConfig.get("retrievalLimit"),
+    retrievalAffinityThreshold: chatConfig.get("retrievalAffinityThreshold")
+  };
+}
+function toolsSettingsEqual(left, right) {
+  return left.documentsDirectory === right.documentsDirectory && left.vectorStoreDirectory === right.vectorStoreDirectory && left.embeddingModel === right.embeddingModel && left.retrievalLimit === right.retrievalLimit && left.retrievalAffinityThreshold === right.retrievalAffinityThreshold;
+}
+function readSyncedToolsSettingsFile(configPath) {
+  const resolvedPath = configPath ?? resolveBigRagToolsConfigPath();
+  try {
+    const rawContents = (0, import_node_fs.readFileSync)(resolvedPath, "utf8");
+    const parsed = JSON.parse(rawContents);
+    return {
+      documentsDirectory: typeof parsed.documentsDirectory === "string" ? parsed.documentsDirectory.trim() : "",
+      vectorStoreDirectory: typeof parsed.vectorStoreDirectory === "string" ? parsed.vectorStoreDirectory.trim() : "",
+      embeddingModel: resolveEmbeddingModelId(parsed.embeddingModel),
+      retrievalLimit: pickNumericSetting(parsed.retrievalLimit),
+      retrievalAffinityThreshold: pickThresholdSetting(parsed.retrievalAffinityThreshold)
+    };
+  } catch {
+    return null;
+  }
+}
+function readToolsEnvLayer(environment = process.env) {
+  const retrievalLimitRaw = environment.BIG_RAG_RETRIEVAL_LIMIT?.trim();
+  const retrievalThresholdRaw = environment.BIG_RAG_RETRIEVAL_AFFINITY_THRESHOLD?.trim();
+  return {
+    documentsDirectory: (environment.BIG_RAG_DOCS_DIR ?? "").trim() || void 0,
+    vectorStoreDirectory: (environment.BIG_RAG_DB_DIR ?? "").trim() || void 0,
+    embeddingModel: (environment.BIG_RAG_EMBEDDING_MODEL ?? "").trim() || void 0,
+    retrievalLimit: retrievalLimitRaw !== void 0 && retrievalLimitRaw !== "" ? Number(retrievalLimitRaw) : void 0,
+    retrievalAffinityThreshold: retrievalThresholdRaw !== void 0 && retrievalThresholdRaw !== "" ? Number(retrievalThresholdRaw) : void 0
+  };
+}
+function writeSyncedToolsSettingsIfChanged(settings) {
+  const configPath = resolveBigRagToolsConfigPath();
+  const existingSettings = readSyncedToolsSettingsFile(configPath);
+  if (existingSettings !== null && toolsSettingsEqual(settings, existingSettings)) {
+    return;
+  }
+  (0, import_node_fs.mkdirSync)((0, import_node_path.dirname)(configPath), { recursive: true });
+  (0, import_node_fs.writeFileSync)(configPath, `${JSON.stringify(settings, null, 2)}
+`, "utf8");
+}
+function syncChatToolsSettingsForRest(chatConfig) {
+  const chatReader = {
+    get: (key) => chatConfig.get(key)
+  };
+  if (!chatPathsConfigured(chatReader)) {
+    return;
+  }
+  const mergedSettings = mergeChatWithSyncedFallback(
+    extractToolsSettingsFromChatConfig(chatConfig),
+    readSyncedToolsSettingsFile()
+  );
+  writeSyncedToolsSettingsIfChanged(mergedSettings);
+}
+function mergeToolsPluginSettingsWithFallbacks(baseSettings, ...fallbackLayers) {
+  return {
+    documentsDirectory: pickFirstNonEmptyString(
+      baseSettings.documentsDirectory,
+      ...fallbackLayers.map((layer) => layer.documentsDirectory)
+    ),
+    vectorStoreDirectory: pickFirstNonEmptyString(
+      baseSettings.vectorStoreDirectory,
+      ...fallbackLayers.map((layer) => layer.vectorStoreDirectory)
+    ),
+    embeddingModel: pickFirstNonEmptyString(
+      baseSettings.embeddingModel,
+      ...fallbackLayers.map((layer) => layer.embeddingModel)
+    ),
+    retrievalLimit: pickNumericSetting(
+      baseSettings.retrievalLimit,
+      ...fallbackLayers.map((layer) => layer.retrievalLimit)
+    ),
+    retrievalAffinityThreshold: pickThresholdSetting(
+      baseSettings.retrievalAffinityThreshold,
+      ...fallbackLayers.map((layer) => layer.retrievalAffinityThreshold)
+    )
+  };
+}
+function mergeChatWithSyncedFallback(chatSettings, syncedSettings) {
+  const syncedLayer = syncedSettings ?? {};
+  return {
+    documentsDirectory: pickFirstNonEmptyString(
+      chatSettings.documentsDirectory,
+      syncedLayer.documentsDirectory
+    ),
+    vectorStoreDirectory: pickFirstNonEmptyString(
+      chatSettings.vectorStoreDirectory,
+      syncedLayer.vectorStoreDirectory
+    ),
+    embeddingModel: pickFirstNonEmptyString(
+      chatSettings.embeddingModel,
+      syncedLayer.embeddingModel
+    ),
+    retrievalLimit: pickNumericSetting(
+      chatSettings.retrievalLimit,
+      syncedLayer.retrievalLimit
+    ),
+    retrievalAffinityThreshold: pickThresholdSetting(
+      chatSettings.retrievalAffinityThreshold,
+      syncedLayer.retrievalAffinityThreshold
+    )
+  };
+}
+function readToolsPluginSettings(ctl) {
+  const chatConfig = ctl.getPluginConfig(configSchematics);
+  const chatSettings = extractToolsSettingsFromChatConfig(chatConfig);
+  const chatReader = {
+    get: (key) => chatSettings[key]
+  };
+  if (chatPathsConfigured(chatReader)) {
+    const mergedChatSettings = mergeChatWithSyncedFallback(
+      chatSettings,
+      readSyncedToolsSettingsFile()
+    );
+    writeSyncedToolsSettingsIfChanged(mergedChatSettings);
+    return mergedChatSettings;
+  }
+  const syncedSettings = readSyncedToolsSettingsFile();
+  const baseSettings = syncedSettings ?? EMPTY_TOOLS_SETTINGS;
+  return mergeToolsPluginSettingsWithFallbacks(
+    baseSettings,
+    readToolsEnvLayer()
+  );
+}
+var import_node_fs, import_node_os, import_node_path, BIG_RAG_TOOLS_CONFIG_FILENAME, DEFAULT_RETRIEVAL_LIMIT, DEFAULT_RETRIEVAL_AFFINITY_THRESHOLD, EMPTY_TOOLS_SETTINGS;
+var init_effectivePluginConfig = __esm({
+  "src/utils/effectivePluginConfig.ts"() {
+    "use strict";
+    import_node_fs = require("node:fs");
+    import_node_os = require("node:os");
+    import_node_path = require("node:path");
+    init_config();
+    BIG_RAG_TOOLS_CONFIG_FILENAME = "big-rag-tools-config.json";
+    DEFAULT_RETRIEVAL_LIMIT = 5;
+    DEFAULT_RETRIEVAL_AFFINITY_THRESHOLD = 0.5;
+    EMPTY_TOOLS_SETTINGS = {
+      documentsDirectory: "",
+      vectorStoreDirectory: "",
+      embeddingModel: DEFAULT_EMBEDDING_MODEL_ID,
+      retrievalLimit: DEFAULT_RETRIEVAL_LIMIT,
+      retrievalAffinityThreshold: DEFAULT_RETRIEVAL_AFFINITY_THRESHOLD
+    };
+  }
+});
+
+// src/rag/retrieval.ts
+function throwIfAborted(abortSignal) {
+  if (abortSignal?.aborted) {
+    throw abortSignal.reason ?? new DOMException("Aborted", "AbortError");
+  }
+}
+function getCachedVectorStore() {
+  return cachedVectorStore;
+}
+async function ensureVectorStore(vectorStoreDir) {
+  const resolvedDir = path7.resolve(vectorStoreDir);
+  if (!cachedVectorStore || lastVectorStoreDir !== resolvedDir) {
+    if (cachedVectorStore !== null && lastVectorStoreDir !== resolvedDir) {
+      await cachedVectorStore.close();
+    }
+    cachedVectorStore = new VectorStore(resolvedDir);
+    await cachedVectorStore.initialize();
+    const statsAfterInit = await cachedVectorStore.getStats();
+    if (statsAfterInit.totalChunks === 0) {
+      await deleteEmbeddingIndexManifest(resolvedDir);
+    }
+    console.info(`[BigRAG] Vector store ready (path=${resolvedDir}). Waiting for queries...`);
+    lastVectorStoreDir = resolvedDir;
+  }
+  return cachedVectorStore;
+}
+function summarizeText(text, maxLines = 3, maxChars = 400) {
+  const lines = text.split(/\r?\n/).filter((line) => line.trim() !== "");
+  const clippedLines = lines.slice(0, maxLines);
+  let clipped = clippedLines.join("\n");
+  if (clipped.length > maxChars) {
+    clipped = clipped.slice(0, maxChars);
+  }
+  const needsEllipsis = lines.length > maxLines || text.length > clipped.length || clipped.length === maxChars && text.length > maxChars;
+  return needsEllipsis ? `${clipped.trimEnd()}\u2026` : clipped;
+}
+function formatRagContext(passages) {
+  let ragContextFull = "";
+  let ragContextPreview = "";
+  const prefix = "The following passages were found in your indexed documents:\n\n";
+  ragContextFull += prefix;
+  ragContextPreview += prefix;
+  let citationNumber = 1;
+  for (const passage of passages) {
+    const fileName = path7.basename(passage.filePath);
+    const citationLabel = `Citation ${citationNumber} (from ${fileName}, score: ${passage.score.toFixed(3)}): `;
+    ragContextFull += `
+${citationLabel}"${passage.text}"
+
+`;
+    ragContextPreview += `
+${citationLabel}"${summarizeText(passage.text)}"
+
+`;
+    citationNumber++;
+  }
+  return {
+    full: ragContextFull.trimEnd(),
+    preview: ragContextPreview.trimEnd()
+  };
+}
+function mapSearchResults(results) {
+  return results.map((result) => ({
+    text: result.text,
+    score: result.score,
+    filePath: result.filePath,
+    fileName: result.fileName,
+    chunkIndex: result.chunkIndex,
+    shardName: result.shardName,
+    metadata: result.metadata
+  }));
+}
+async function retrievePassages(params) {
+  const {
+    client: client2,
+    vectorStoreDir,
+    embeddingModelId,
+    query,
+    retrievalLimit,
+    retrievalThreshold,
+    abortSignal
+  } = params;
+  const resolvedModelId = resolveEmbeddingModelId(embeddingModelId);
+  const resolvedStoreDir = path7.resolve(vectorStoreDir);
+  throwIfAborted(abortSignal);
+  const store = await ensureVectorStore(resolvedStoreDir);
+  const stats = await store.getStats();
+  if (stats.totalChunks === 0) {
+    await deleteEmbeddingIndexManifest(resolvedStoreDir);
+    return {
+      ok: false,
+      reason: "empty-index",
+      message: "The document index is empty (no chunks stored yet)."
+    };
+  }
+  const embeddingModel = await client2.embedding.model(resolvedModelId, {
+    signal: abortSignal
+  });
+  throwIfAborted(abortSignal);
+  const compatibility = await checkEmbeddingModelForRetrieval({
+    vectorStoreDir: resolvedStoreDir,
+    resolvedModelId,
+    totalChunks: stats.totalChunks,
+    embeddingModel
+  });
+  if (!compatibility.ok) {
+    return {
+      ok: false,
+      reason: "embedding-mismatch",
+      message: compatibility.userMessage,
+      logMessage: compatibility.logMessage
+    };
+  }
+  const queryPreview = query.length > 160 ? `${query.slice(0, 160)}...` : query;
+  console.info(
+    `[BigRAG] Executing vector search for "${queryPreview}" (limit=${retrievalLimit}, threshold=${retrievalThreshold})`
+  );
+  const queryEmbeddingResult = await embeddingModel.embed(query);
+  throwIfAborted(abortSignal);
+  const results = await store.search(
+    queryEmbeddingResult.embedding,
+    retrievalLimit,
+    retrievalThreshold
+  );
+  if (results.length > 0) {
+    const topHit = results[0];
+    console.info(
+      `[BigRAG] Vector search returned ${results.length} results. Top hit: file=${topHit.fileName} score=${topHit.score.toFixed(3)}`
+    );
+  } else {
+    console.warn("[BigRAG] Vector search returned 0 results.");
+  }
+  return { ok: true, passages: mapSearchResults(results) };
+}
+async function getIndexStatus(params) {
+  const { documentsDirectory, vectorStoreDirectory, embeddingModelId } = params;
+  if (!documentsDirectory.trim()) {
+    return { error: "Documents directory is not configured." };
+  }
+  if (!vectorStoreDirectory.trim()) {
+    return { error: "Vector store directory is not configured." };
+  }
+  const store = await ensureVectorStore(vectorStoreDirectory);
+  const stats = await store.getStats();
+  return {
+    documentsDirectory,
+    vectorStoreDirectory,
+    embeddingModelId: resolveEmbeddingModelId(embeddingModelId),
+    totalChunks: stats.totalChunks,
+    uniqueFiles: stats.uniqueFiles
+  };
+}
+var path7, cachedVectorStore, lastVectorStoreDir;
+var init_retrieval = __esm({
+  "src/rag/retrieval.ts"() {
+    "use strict";
+    path7 = __toESM(require("path"));
+    init_config();
+    init_vectorStore();
+    init_embeddingIndexManifest();
+    cachedVectorStore = null;
+    lastVectorStoreDir = "";
+  }
+});
+
 // src/promptPreprocessor.ts
 function checkAbort(signal) {
   if (signal.aborted) {
@@ -2197,16 +2771,6 @@ function isAbortError(error) {
   if (error instanceof Error && error.name === "AbortError") return true;
   if (error instanceof Error && error.message === "Aborted") return true;
   return false;
-}
-function summarizeText(text, maxLines = 3, maxChars = 400) {
-  const lines = text.split(/\r?\n/).filter((line) => line.trim() !== "");
-  const clippedLines = lines.slice(0, maxLines);
-  let clipped = clippedLines.join("\n");
-  if (clipped.length > maxChars) {
-    clipped = clipped.slice(0, maxChars);
-  }
-  const needsEllipsis = lines.length > maxLines || text.length > clipped.length || clipped.length === maxChars && text.length > maxChars;
-  return needsEllipsis ? `${clipped.trimEnd()}\u2026` : clipped;
 }
 function normalizePromptTemplate(template) {
   const hasContent = typeof template === "string" && template.trim().length > 0;
@@ -2278,6 +2842,7 @@ async function warnIfContextOverflow(ctl, finalPrompt) {
 async function preprocess(ctl, userMessage) {
   const userPrompt = userMessage.getText();
   const pluginConfig = ctl.getPluginConfig(configSchematics);
+  syncChatToolsSettingsForRest(pluginConfig);
   const documentsDir = pluginConfig.get("documentsDirectory");
   const vectorStoreDir = pluginConfig.get("vectorStoreDirectory");
   const retrievalLimit = pluginConfig.get("retrievalLimit");
@@ -2291,6 +2856,10 @@ async function preprocess(ctl, userMessage) {
   const reindexRequested = pluginConfig.get("manualReindex.trigger");
   const resolvedEmbeddingModelId = resolveEmbeddingModelId(pluginConfig.get("embeddingModel"));
   const excludePatterns = parseExcludePatternsBlock(pluginConfig.get("excludeFilenamePatterns") ?? "");
+  const { additionalPlainTextSet: additionalPlainTextExtensions } = resolveAdditionalExtensions(
+    pluginConfig.get("additionalExtensions") ?? "",
+    (message) => console.warn(message)
+  );
   if (!documentsDir || documentsDir === "") {
     console.warn("[BigRAG] Documents directory not configured. Please set it in plugin settings.");
     return userMessage;
@@ -2327,25 +2896,21 @@ async function preprocess(ctl, userMessage) {
       sanityChecksPassed = true;
     }
     checkAbort(ctl.abortSignal);
-    if (!vectorStore || lastIndexedDir !== vectorStoreDir) {
+    {
       const status = ctl.createStatus({
         status: "loading",
         text: "Initializing vector store..."
       });
-      vectorStore = new VectorStore(vectorStoreDir);
-      await vectorStore.initialize();
-      const statsAfterInit = await vectorStore.getStats();
-      if (statsAfterInit.totalChunks === 0) {
-        await deleteEmbeddingIndexManifest(vectorStoreDir);
-      }
-      console.info(
-        `[BigRAG] Vector store ready (path=${vectorStoreDir}). Waiting for queries...`
-      );
-      lastIndexedDir = vectorStoreDir;
+      await ensureVectorStore(vectorStoreDir);
       status.setState({
         status: "done",
         text: "Vector store initialized"
       });
+    }
+    const vectorStore = getCachedVectorStore();
+    if (!vectorStore) {
+      console.error("[BigRAG] Vector store failed to initialize.");
+      return userMessage;
     }
     checkAbort(ctl.abortSignal);
     await maybeHandleConfigTriggeredReindex({
@@ -2360,6 +2925,7 @@ async function preprocess(ctl, userMessage) {
       parseDelayMs,
       reindexRequested,
       excludePatterns,
+      additionalPlainTextExtensions,
       skipPreviouslyIndexed: pluginConfig.get("manualReindex.skipPreviouslyIndexed")
     });
     checkAbort(ctl.abortSignal);
@@ -2387,6 +2953,7 @@ async function preprocess(ctl, userMessage) {
             autoReindex: false,
             parseDelayMs,
             excludePatterns,
+            additionalPlainTextExtensions,
             vectorStore,
             forceReindex: true,
             onProgress: (progress) => {
@@ -2451,59 +3018,47 @@ ${userPrompt}`;
     }
     const retrievalStatus = ctl.createStatus({
       status: "loading",
-      text: `Loading embedding model for retrieval: ${resolvedEmbeddingModelId}`
+      text: "Searching for relevant content..."
     });
-    const embeddingModel = await ctl.client.embedding.model(resolvedEmbeddingModelId, {
-      signal: ctl.abortSignal
+    const retrievalResult = await retrievePassages({
+      client: ctl.client,
+      vectorStoreDir,
+      embeddingModelId: resolvedEmbeddingModelId,
+      query: userPrompt,
+      retrievalLimit,
+      retrievalThreshold,
+      abortSignal: ctl.abortSignal
     });
     checkAbort(ctl.abortSignal);
-    const compatibility = await checkEmbeddingModelForRetrieval({
-      vectorStoreDir,
-      resolvedModelId: resolvedEmbeddingModelId,
-      totalChunks: retrievalStats.totalChunks,
-      embeddingModel
-    });
-    if (!compatibility.ok) {
+    if (!retrievalResult.ok) {
       retrievalStatus.setState({
-        status: "error",
-        text: compatibility.userMessage
+        status: retrievalResult.reason === "embedding-mismatch" ? "error" : "canceled",
+        text: retrievalResult.message
       });
-      console.error("[BigRAG]", compatibility.logMessage);
-      return compatibility.userMessage + `
+      if (retrievalResult.logMessage) {
+        console.error("[BigRAG]", retrievalResult.logMessage);
+      }
+      if (retrievalResult.reason === "embedding-mismatch") {
+        return retrievalResult.message + `
+
+User Query:
+
+${userPrompt}`;
+      }
+      const noteAboutEmptyIndex = `Important: The document index is empty (no chunks stored yet). In one short sentence, tell the user that nothing has been indexed. Then answer their question to the best of your ability without claiming document retrieval.`;
+      return noteAboutEmptyIndex + `
 
 User Query:
 
 ${userPrompt}`;
     }
-    retrievalStatus.setState({
-      status: "loading",
-      text: "Searching for relevant content..."
-    });
-    const queryEmbeddingResult = await embeddingModel.embed(userPrompt);
-    checkAbort(ctl.abortSignal);
-    const queryEmbedding = queryEmbeddingResult.embedding;
-    const queryPreview = userPrompt.length > 160 ? `${userPrompt.slice(0, 160)}...` : userPrompt;
-    console.info(
-      `[BigRAG] Executing vector search for "${queryPreview}" (limit=${retrievalLimit}, threshold=${retrievalThreshold})`
-    );
-    const results = await vectorStore.search(
-      queryEmbedding,
-      retrievalLimit,
-      retrievalThreshold
-    );
-    checkAbort(ctl.abortSignal);
+    const results = retrievalResult.passages;
     if (results.length > 0) {
-      const topHit = results[0];
-      console.info(
-        `[BigRAG] Vector search returned ${results.length} results. Top hit: file=${topHit.fileName} score=${topHit.score.toFixed(3)}`
-      );
       const docSummaries = results.map(
-        (result, idx) => `#${idx + 1} file=${path7.basename(result.filePath)} shard=${result.shardName} score=${result.score.toFixed(3)}`
+        (result, idx) => `#${idx + 1} file=${path8.basename(result.filePath)} shard=${result.shardName} score=${result.score.toFixed(3)}`
       ).join("\n");
       console.info(`[BigRAG] Relevant documents:
 ${docSummaries}`);
-    } else {
-      console.warn("[BigRAG] Vector search returned 0 results.");
     }
     if (results.length === 0) {
       retrievalStatus.setState({
@@ -2522,37 +3077,19 @@ ${userPrompt}`;
       text: `Retrieved ${results.length} relevant passages`
     });
     ctl.debug("Retrieval results:", results);
-    let ragContextFull = "";
-    let ragContextPreview = "";
-    const prefix = "The following passages were found in your indexed documents:\n\n";
-    ragContextFull += prefix;
-    ragContextPreview += prefix;
-    let citationNumber = 1;
-    for (const result of results) {
-      const fileName = path7.basename(result.filePath);
-      const citationLabel = `Citation ${citationNumber} (from ${fileName}, score: ${result.score.toFixed(3)}): `;
-      ragContextFull += `
-${citationLabel}"${result.text}"
-
-`;
-      ragContextPreview += `
-${citationLabel}"${summarizeText(result.text)}"
-
-`;
-      citationNumber++;
-    }
+    const { full: ragContextFull, preview: ragContextPreview } = formatRagContext(results);
     const promptTemplate = normalizePromptTemplate(pluginConfig.get("promptTemplate"));
     const finalPrompt = fillPromptTemplate(promptTemplate, {
-      [RAG_CONTEXT_MACRO]: ragContextFull.trimEnd(),
+      [RAG_CONTEXT_MACRO]: ragContextFull,
       [USER_QUERY_MACRO]: userPrompt
     });
     const finalPromptPreview = fillPromptTemplate(promptTemplate, {
-      [RAG_CONTEXT_MACRO]: ragContextPreview.trimEnd(),
+      [RAG_CONTEXT_MACRO]: ragContextPreview,
       [USER_QUERY_MACRO]: userPrompt
     });
     ctl.debug("Processed content (preview):", finalPromptPreview);
     const passagesLogEntries = results.map((result, idx) => {
-      const fileName = path7.basename(result.filePath);
+      const fileName = path8.basename(result.filePath);
       return `#${idx + 1} file=${fileName} shard=${result.shardName} score=${result.score.toFixed(3)}
 ${summarizeText(result.text)}`;
     });
@@ -2598,6 +3135,7 @@ async function maybeHandleConfigTriggeredReindex({
   parseDelayMs,
   reindexRequested,
   excludePatterns,
+  additionalPlainTextExtensions,
   skipPreviouslyIndexed
 }) {
   if (!reindexRequested) {
@@ -2634,8 +3172,9 @@ async function maybeHandleConfigTriggeredReindex({
       autoReindex: skipPreviouslyIndexed,
       parseDelayMs,
       excludePatterns,
+      additionalPlainTextExtensions,
       forceReindex: !skipPreviouslyIndexed,
-      vectorStore: vectorStore ?? void 0,
+      vectorStore: getCachedVectorStore() ?? void 0,
       onProgress: (progress) => {
         if (progress.status === "scanning") {
           status.setState({
@@ -2712,23 +3251,126 @@ async function notifyManualResetNeeded(ctl, embeddingModelId) {
     console.warn("[BigRAG] Unable to send notification about manual reindex reset:", error);
   }
 }
-var path7, vectorStore, lastIndexedDir, sanityChecksPassed, RAG_CONTEXT_MACRO, USER_QUERY_MACRO;
+var path8, sanityChecksPassed, RAG_CONTEXT_MACRO, USER_QUERY_MACRO;
 var init_promptPreprocessor = __esm({
   "src/promptPreprocessor.ts"() {
     "use strict";
     init_config();
-    init_vectorStore();
     init_sanityChecks();
     init_indexingLock();
     init_embeddingIndexManifest();
-    path7 = __toESM(require("path"));
+    path8 = __toESM(require("path"));
     init_runIndexing();
     init_fileExcludePatterns();
-    vectorStore = null;
-    lastIndexedDir = "";
+    init_additionalExtensions();
+    init_effectivePluginConfig();
+    init_retrieval();
     sanityChecksPassed = false;
     RAG_CONTEXT_MACRO = "{{rag_context}}";
     USER_QUERY_MACRO = "{{user_query}}";
+  }
+});
+
+// src/toolsProvider.ts
+async function provideTools(ctl) {
+  const searchTool = (0, import_sdk2.tool)({
+    name: "big_rag_search",
+    description: "Search the Big RAG indexed document collection for passages relevant to a query. Returns matching text snippets with file names and similarity scores.",
+    parameters: {
+      query: import_zod.z.string().describe("Natural-language search query"),
+      limit: import_zod.z.number().int().min(1).max(20).optional().describe("Maximum passages to return (defaults to plugin Retrieval Limit setting)")
+    },
+    implementation: async ({ query, limit }, { signal, status }) => {
+      status("Searching indexed documents\u2026");
+      const pluginSettings = readToolsPluginSettings(ctl);
+      const trimmedQuery = query.trim();
+      if (trimmedQuery.length === 0) {
+        return "Error: Search query must not be empty.";
+      }
+      const vectorStoreDir = pluginSettings.vectorStoreDirectory;
+      if (!vectorStoreDir.trim()) {
+        return "Error: Vector store directory is not configured. Set paths in the chat Integrations sidebar. REST reuses them via auto-sync to ~/.lmstudio/big-rag-tools-config.json, or set BIG_RAG_DOCS_DIR / BIG_RAG_DB_DIR env vars on the LM Studio process.";
+      }
+      const retrievalLimit = limit ?? pluginSettings.retrievalLimit;
+      const retrievalThreshold = pluginSettings.retrievalAffinityThreshold;
+      const embeddingModelId = resolveEmbeddingModelId(pluginSettings.embeddingModel);
+      const result = await retrievePassages({
+        client: ctl.client,
+        vectorStoreDir,
+        embeddingModelId,
+        query: trimmedQuery,
+        retrievalLimit,
+        retrievalThreshold,
+        abortSignal: signal
+      });
+      if (!result.ok) {
+        if (result.logMessage) {
+          console.error("[BigRAG]", result.logMessage);
+        }
+        return `Error: ${result.message}`;
+      }
+      if (result.passages.length === 0) {
+        return JSON.stringify(
+          {
+            query: trimmedQuery,
+            passageCount: 0,
+            passages: [],
+            message: "No relevant content found in indexed documents for this query."
+          },
+          null,
+          2
+        );
+      }
+      return JSON.stringify(
+        {
+          query: trimmedQuery,
+          passageCount: result.passages.length,
+          passages: result.passages.map((passage, index) => ({
+            rank: index + 1,
+            fileName: passage.fileName,
+            filePath: passage.filePath,
+            score: passage.score,
+            shardName: passage.shardName,
+            text: passage.text
+          }))
+        },
+        null,
+        2
+      );
+    }
+  });
+  const statusTool = (0, import_sdk2.tool)({
+    name: "big_rag_index_status",
+    description: "Return Big RAG index statistics: chunk count, unique file count, and configured directories.",
+    parameters: {},
+    implementation: async (_params, { status }) => {
+      status("Reading index status\u2026");
+      const pluginSettings = readToolsPluginSettings(ctl);
+      const documentsDir = pluginSettings.documentsDirectory;
+      const vectorStoreDir = pluginSettings.vectorStoreDirectory;
+      const embeddingModelId = resolveEmbeddingModelId(pluginSettings.embeddingModel);
+      const indexStatus = await getIndexStatus({
+        documentsDirectory: documentsDir,
+        vectorStoreDirectory: vectorStoreDir,
+        embeddingModelId
+      });
+      if ("error" in indexStatus) {
+        return `Error: ${indexStatus.error} Set paths in chat Integrations sidebar (syncs for REST on first message), or BIG_RAG_DOCS_DIR / BIG_RAG_DB_DIR env vars.`;
+      }
+      return JSON.stringify(indexStatus, null, 2);
+    }
+  });
+  return [searchTool, statusTool];
+}
+var import_sdk2, import_zod;
+var init_toolsProvider = __esm({
+  "src/toolsProvider.ts"() {
+    "use strict";
+    import_sdk2 = require("@lmstudio/sdk");
+    import_zod = require("zod");
+    init_config();
+    init_retrieval();
+    init_effectivePluginConfig();
   }
 });
 
@@ -2740,6 +3382,7 @@ __export(src_exports, {
 async function main(context) {
   context.withConfigSchematics(configSchematics);
   context.withPromptPreprocessor(preprocess);
+  context.withToolsProvider(provideTools);
   console.log("[BigRAG] Plugin initialized successfully");
 }
 var init_src = __esm({
@@ -2747,15 +3390,16 @@ var init_src = __esm({
     "use strict";
     init_config();
     init_promptPreprocessor();
+    init_toolsProvider();
   }
 });
 
 // .lmstudio/entry.ts
-var import_sdk2 = require("@lmstudio/sdk");
+var import_sdk3 = require("@lmstudio/sdk");
 var clientIdentifier = process.env.LMS_PLUGIN_CLIENT_IDENTIFIER;
 var clientPasskey = process.env.LMS_PLUGIN_CLIENT_PASSKEY;
 var baseUrl = process.env.LMS_PLUGIN_BASE_URL;
-var client = new import_sdk2.LMStudioClient({
+var client = new import_sdk3.LMStudioClient({
   clientIdentifier,
   clientPasskey,
   baseUrl

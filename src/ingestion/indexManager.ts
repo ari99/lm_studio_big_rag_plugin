@@ -52,6 +52,8 @@ export interface IndexingOptions {
   failureReportPath?: string;
   /** Glob patterns (relative to documents dir); matched supported files are skipped before parsing. */
   excludePatterns?: string[];
+  /** User-declared plain-text extensions (e.g. .java) merged into the scan gate and parse path. */
+  additionalPlainTextExtensions?: ReadonlySet<string>;
   abortSignal?: AbortSignal;
   onProgress?: (progress: IndexingProgress) => void;
 }
@@ -136,6 +138,7 @@ export class IndexManager {
         },
         {
           excludePatterns,
+          additionalPlainTextExtensions: this.options.additionalPlainTextExtensions,
           onExcludedFile,
         },
       );
@@ -346,7 +349,12 @@ export class IndexManager {
       }
 
       // Parse document
-      const parsedResult = await parseDocument(file.path, enableOCR, client);
+      const parsedResult = await parseDocument(
+        file.path,
+        enableOCR,
+        client,
+        this.options.additionalPlainTextExtensions ?? new Set<string>(),
+      );
       if (!parsedResult.success) {
         this.recordFailure(parsedResult.reason, parsedResult.details, file);
         if (fileHash) {

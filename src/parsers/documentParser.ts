@@ -12,6 +12,7 @@ import {
   isPlainTextExtension,
   isTextualExtension,
 } from "../utils/supportedExtensions";
+import { isAdditionalPlainTextExtension } from "../utils/additionalExtensions";
 
 export interface ParsedDocument {
   text: string;
@@ -48,6 +49,7 @@ export async function parseDocument(
   filePath: string,
   enableOCR: boolean = false,
   client?: LMStudioClient,
+  additionalPlainTextExtensions: ReadonlySet<string> = new Set<string>(),
 ): Promise<DocumentParseResult> {
   const ext = path.extname(filePath).toLowerCase();
   const fileName = path.basename(filePath);
@@ -142,6 +144,24 @@ export async function parseDocument(
     if (ext === ".rar") {
       console.log(`RAR files not yet supported: ${filePath}`);
       return { success: false, reason: "unsupported-extension", details: ".rar" };
+    }
+
+    if (isAdditionalPlainTextExtension(ext, additionalPlainTextExtensions)) {
+      try {
+        const text = await parseText(filePath, {
+          stripMarkdown: false,
+          preserveLineBreaks: true,
+        });
+        const cleaned = cleanAndValidate(text, "text.empty", fileName);
+        return cleaned.success ? buildSuccess(cleaned.value) : cleaned;
+      } catch (error) {
+        console.error(`[Parser][AdditionalPlainText] Error parsing ${filePath}:`, error);
+        return {
+          success: false,
+          reason: "text.error",
+          details: error instanceof Error ? error.message : String(error),
+        };
+      }
     }
 
     console.log(`Unsupported file type: ${filePath}`);

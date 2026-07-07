@@ -18,6 +18,8 @@ export interface RunIndexingParams {
   parseDelayMs: number;
   /** Glob patterns relative to documents dir; matching supported files are not parsed or embedded. */
   excludePatterns?: string[];
+  /** User-declared plain-text extensions to index as plain text. */
+  additionalPlainTextExtensions?: ReadonlySet<string>;
   forceReindex?: boolean;
   vectorStore?: VectorStore;
   onProgress?: (progress: IndexingProgress) => void;
@@ -49,6 +51,7 @@ export async function runIndexingJob({
   autoReindex,
   parseDelayMs,
   excludePatterns = [],
+  additionalPlainTextExtensions = new Set<string>(),
   forceReindex = false,
   vectorStore: existingVectorStore,
   onProgress,
@@ -76,6 +79,7 @@ export async function runIndexingJob({
     autoReindex: forceReindex ? false : autoReindex,
     parseDelayMs,
     excludePatterns,
+    additionalPlainTextExtensions,
     abortSignal,
     onProgress,
   });

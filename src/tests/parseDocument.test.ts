@@ -47,3 +47,17 @@ test("parseDocument preserves paragraph spacing for plain text", async () => {
   assert.ok(text.startsWith("This is a plain text document."));
 });
 
+test("parseDocument reads user additional plain-text extensions", async () => {
+  const javaPath = path.join(FIXTURE_DIR, "sample.java");
+  const additional = new Set([".java"]);
+  const result = await parseDocument(javaPath, false, undefined, additional);
+
+  assert.equal(result.success, true, `Expected success but got ${result.success ? "success" : result.reason}`);
+  if (!result.success) {
+    return;
+  }
+
+  assert.ok(result.document.text.includes("Hello from Java fixture"));
+  assert.ok(result.document.text.includes("public class SampleJava"));
+});
+

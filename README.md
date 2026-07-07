@@ -23,29 +23,54 @@ A powerful RAG (Retrieval-Augmented Generation) plugin for LM Studio that can in
 
 ## Installation
 
-1. Navigate to the plugin directory:
 ```bash
 cd big-rag-plugin
-```
-
-2. Install dependencies:
-```bash
 npm install
-```
-
-3. Build the plugin:
-```bash
 npm run build
 ```
 
-4. Run in development mode:
+Then choose one of the following:
+
+| Goal | Command | Plugin id for REST |
+|------|---------|-------------------|
+| **Dev** (hot reload, chat UI) | `npm run dev` | Use installed copy for REST (see below) |
+| **Local install** (REST + chat) | `lms dev --install -y` | `mindstudio/big-rag` |
+| **Publish to Hub** | `lms login` then `lms push -y` | `mindstudio/big-rag` |
+
+After code changes: `npm run build` then re-run `npm run dev`, `lms dev --install -y`, or `lms push -y`.
+
+Hub page: [lmstudio.ai/mindstudio/big-rag](https://lmstudio.ai/mindstudio/big-rag)
+
+## Manual testing
+
+**Default chat workflow** — no `lms server start`; the server runs inside the LM Studio app (`http://localhost:1234` when enabled).
+
+1. Open the **LM Studio** desktop app.
+2. Load the plugin (pick one):
+   - **Dev:** `cd big-rag-plugin && npm run dev` (leave running; good for UI iteration)
+   - **Installed (required for REST):** `cd big-rag-plugin && npm run build && lms dev --install -y`
+3. Open a **Chat** → right sidebar → **Integrations** (hammer icon) → enable **Big RAG** → expand the row and set **Documents Directory**, **Vector Store Directory**, etc.
+4. Send a chat message. The first message auto-indexes if the vector store is empty.
+
+**Automated tests** (no UI):
+
 ```bash
-npm run dev
+cd big-rag-plugin && npm test
 ```
+
+**Headless indexing** (optional; LM Studio app must be open for embeddings):
+
+```bash
+cd big-rag-plugin && npm run index
+```
+
+Paths are set in `package.json` `index` script or via `BIG_RAG_DOCS_DIR` / `BIG_RAG_DB_DIR` env vars.
 
 ## Configuration
 
-The plugin provides the following configuration options in LM Studio:
+All plugin fields appear in the **chat Integrations sidebar** when Big RAG is enabled (expand the plugin row). There is no separate global settings screen for document paths.
+
+The plugin provides the following configuration options:
 
 ### Required Settings
 
@@ -71,6 +96,13 @@ The plugin provides the following configuration options in LM Studio:
 - **Max Concurrent Files** (1-10, default: 1): Number of files to process simultaneously
 - **Enable OCR** (default: true): Enable OCR for image files and image-based PDFs using LM Studio's built-in document parser
 
+### File indexing filters
+
+- **Exclude filename patterns**: Optional globs (one per line) matched against paths relative to the Documents Directory. Example: `*.png`, `node_modules/**`, `target/**`. Applied after the extension gate; does not remove chunks already in the vector store.
+- **Additional plain-text extensions**: Optional list of extra extensions to index as plain text (one per line), for example `.java`, `.cs`, or `.py`. Built-in types such as PDF, EPUB, and HTML keep their dedicated parsers and do not need to be listed. Binary extensions (`.exe`, `.zip`, etc.) are rejected. Pair with exclude patterns when indexing source trees, e.g. `node_modules/**`, `target/**`, `bin/**`.
+
+CLI equivalents: `BIG_RAG_EXCLUDE_PATTERNS` and `BIG_RAG_ADDITIONAL_EXTENSIONS` (semicolon-separated).
+
 ### Reindexing Controls
 
 - **Manual Reindex Trigger** (toggle): Turn this ON and submit any chat message to force indexing to run on every chat session where the plugin is enabled. Flip it OFF once you’re done to stop the automatic reindex loop.
@@ -79,21 +111,121 @@ The plugin provides the following configuration options in LM Studio:
 
 ## Usage
 
-1. **Configure the Plugin**:
-   - Open LM Studio settings
-   - Navigate to the Big RAG plugin configuration
-   - Set your documents directory (e.g., `/Users/user/Documents/MyLibrary`)
-   - Set your vector store directory (e.g., `/Users/user/.lmstudio/big-rag-db`)
+1. **Configure the plugin** (one place — the chat sidebar):
+   - Open a **Chat** in LM Studio
+   - Right sidebar → **Integrations** tab (hammer icon) — **not** Settings → Integrations
+   - Enable **Big RAG** and **expand** the plugin row to show config fields
+   - Set **Documents Directory** (e.g. `/Users/user/Documents/MyLibrary`)
+   - Set **Vector Store Directory** (e.g. `/Users/user/.lmstudio/big-rag-db`)
 
-2. **Initial Indexing**:
-   - The first time you send a message, the plugin will automatically scan and index your documents
-   - This process may take a while depending on the size of your document collection
-   - Progress will be shown in the LM Studio interface
+   Settings → Integrations (gear menu) only controls tool-call confirmation — **not** document paths.
 
-3. **Query Your Documents**:
-   - Simply chat with your LM Studio model as usual
-   - The plugin will automatically search your indexed documents for relevant content
-   - Retrieved passages will be injected into the context for the model to use
+2. **Initial indexing**:
+   - The first chat message triggers a scan/index if the vector store is empty
+   - Progress appears in LM Studio developer logs (`[BigRAG]` lines)
+
+3. **Query your documents**:
+   - Chat normally; the prompt preprocessor injects relevant passages automatically
+
+## Using Big RAG via REST API
+
+Big RAG registers a **prompt preprocessor** (automatic RAG in chat) and a **tools provider** (`big_rag_search`, `big_rag_index_status`) for `/api/v1/chat`.
+
+### Prerequisites
+
+1. LM Studio app open with local server enabled (`http://localhost:1234`).
+2. Plugin **installed** locally or from Hub — REST requires id `"mindstudio/big-rag"` (`owner/name` from `manifest.json`). The dev id (`dev/mindstudio/big-rag` from `npm run dev`) works in chat UI but **not** in REST.
+3. Install/update: `npm run build && lms dev --install -y` (local) or `lms push -y` (Hub).
+4. LM Studio **Server Settings**: enable **Allow calling servers from mcp.json** (required for plugin integrations).
+5. If API auth is on: create a token and pass `Authorization: Bearer $LM_API_TOKEN` ([docs](https://lmstudio.ai/docs/developer/core/authentication)).
+6. Load an LLM and embedding model in LM Studio.
+
+### REST configuration (tools)
+
+REST tool calls have **no chat session**, so they do not read the sidebar directly. Paths come from (in order):
+
+1. Chat sidebar values, merged and synced to `~/.lmstudio/big-rag-tools-config.json` when the **prompt preprocessor runs** (send at least one chat message with Big RAG enabled after configuring paths).
+2. That synced JSON file (persists until deleted).
+3. Environment variables on the **LM Studio process**: `BIG_RAG_DOCS_DIR`, `BIG_RAG_DB_DIR`, optional `BIG_RAG_EMBEDDING_MODEL`, `BIG_RAG_RETRIEVAL_LIMIT`, `BIG_RAG_RETRIEVAL_AFFINITY_THRESHOLD`.
+
+If you delete the JSON file, send a chat message again or set the env vars before calling tools via curl.
+
+### Native REST API (`/api/v1/chat`)
+
+Load your API token (example: repo-root `.env`):
+
+```bash
+export $(grep -v '^#' .env | xargs)   # sets LM_API_TOKEN
+```
+
+**Index status** (one tool — reliable):
+
+```bash
+curl -s http://127.0.0.1:1234/api/v1/chat \
+  -H "Authorization: Bearer $LM_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "your-model-id",
+    "input": "Call big_rag_index_status and report totalChunks.",
+    "integrations": [{
+      "type": "plugin",
+      "id": "mindstudio/big-rag",
+      "allowed_tools": ["big_rag_index_status"]
+    }],
+    "temperature": 0
+  }' | python3 -m json.tool
+```
+
+**Search** (one tool — use `limit 3` in the prompt to avoid context overflow):
+
+```bash
+curl -s http://127.0.0.1:1234/api/v1/chat \
+  -H "Authorization: Bearer $LM_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "your-model-id",
+    "input": "Use big_rag_search to find content about rifle cleaning. Use limit 3.",
+    "integrations": [{
+      "type": "plugin",
+      "id": "mindstudio/big-rag",
+      "allowed_tools": ["big_rag_search"]
+    }],
+    "temperature": 0
+  }' | python3 -m json.tool
+```
+
+**Preprocessor-only RAG** (no explicit tools — model answers using injected context; needs sidebar config + chat sync or env vars):
+
+```bash
+curl -s http://127.0.0.1:1234/api/v1/chat \
+  -H "Authorization: Bearer $LM_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "your-model-id",
+    "input": "What does the documentation say about rifling?",
+    "integrations": [{
+      "type": "plugin",
+      "id": "mindstudio/big-rag"
+    }],
+    "temperature": 0
+  }' | python3 -m json.tool
+```
+
+### Plugin tools
+
+| Tool | Description |
+|------|-------------|
+| `big_rag_search` | Embed a query and return matching passages (JSON with scores and file names) |
+| `big_rag_index_status` | Return chunk count, unique file count, and configured directory paths |
+
+### REST limitations (observed behavior)
+
+- **One tool per request** works reliably. Prompts like “first call X, then Y” may fail with `tool_format_generation_error` because smaller models (e.g. Llama 3.1 8B) emit multiple tool calls in one generation block. Run separate curl requests instead.
+- **Large tool outputs**: `big_rag_search` with `limit=10` returns full passage text and can exceed the model context window (e.g. 14848 tokens). Ask for `limit 3` or increase context length in LM Studio.
+- **Permission denied**: enable “Allow calling servers from mcp.json” and use a valid API token.
+- **“Vector store / Documents directory is not configured”**: sync config via a chat message, restore `~/.lmstudio/big-rag-tools-config.json`, or set `BIG_RAG_DOCS_DIR` / `BIG_RAG_DB_DIR`.
+- Prefer `/api/v1/chat` over OpenAI-compatible `/v1/chat/completions` for plugin integrations.
+- Use the same **Embedding Model** for indexing and retrieval; reindex after changing models.
 
 ## Architecture
 
@@ -127,6 +259,13 @@ The plugin provides the following configuration options in LM Studio:
    - Performs vector search
    - Injects relevant context
 
+6. **Retrieval module** (`src/rag/retrieval.ts`):
+   - Shared vector store cache, search, and citation formatting
+   - Used by the prompt preprocessor and tools provider
+
+7. **Tools Provider** (`src/toolsProvider.ts`):
+   - Exposes `big_rag_search` and `big_rag_index_status` for REST API / agent integrations
+
 ## Performance Considerations
 
 ### Large Datasets
@@ -144,6 +283,28 @@ The plugin provides the following configuration options in LM Studio:
 5. **Threshold Tuning**: Adjust `retrievalAffinityThreshold` based on result quality
 
 ## Troubleshooting
+
+### REST: “Documents / Vector store directory is not configured”
+
+- Configure paths in the **chat Integrations sidebar**, then send **one chat message** to sync to `~/.lmstudio/big-rag-tools-config.json`.
+- Or set `BIG_RAG_DOCS_DIR` and `BIG_RAG_DB_DIR` on the LM Studio process.
+- Ensure REST uses `"mindstudio/big-rag"` and the plugin is installed (`lms dev --install -y`).
+
+### REST: `tool_format_generation_error`
+
+- Use **one tool per curl request** (`allowed_tools` with a single entry).
+- Avoid “first call X, then Y” in one prompt; chain with separate requests.
+
+### REST: “Context size has been exceeded”
+
+- Lower search results: include “limit 3” in the prompt.
+- Increase context length for your LLM in LM Studio.
+- Do not stack multiple large tool results in one session.
+
+### REST: “Permission denied to use plugin”
+
+- Server Settings → enable **Allow calling servers from mcp.json**.
+- Pass `Authorization: Bearer $LM_API_TOKEN` if API auth is enabled.
 
 ### No Results Found
 
@@ -223,18 +384,11 @@ big-rag-plugin/
 
 ### Testing
 
-Automated parser smoke tests cover HTML, Markdown, and plain text ingestion:
+See **Manual testing** at the top of this README. Summary:
 
-```bash
-npm run test
-```
-
-For end-to-end validation:
-
-1. Create a test directory with sample documents
-2. Configure the plugin to use this directory
-3. Send a test query to verify retrieval works
-4. Check LM Studio logs for any errors
+- `npm test` — unit tests (extensions, parsers, retrieval helpers)
+- `npm run dev` + LM Studio chat — E2E UI (dev plugin)
+- `npm run build && lms dev --install -y` + curl to `/api/v1/chat` — E2E REST (installed plugin id `mindstudio/big-rag`; config synced via chat message or env vars)
 
 ### Contributing
 

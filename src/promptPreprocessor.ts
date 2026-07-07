@@ -3,16 +3,21 @@ import {
   type PromptPreprocessorController,
 } from "@lmstudio/sdk";
 import { configSchematics, DEFAULT_PROMPT_TEMPLATE, resolveEmbeddingModelId } from "./config";
-import { VectorStore } from "./vectorstore/vectorStore";
 import { performSanityChecks } from "./utils/sanityChecks";
 import { tryStartIndexing, finishIndexing } from "./utils/indexingLock";
-import {
-  checkEmbeddingModelForRetrieval,
-  deleteEmbeddingIndexManifest,
-} from "./utils/embeddingIndexManifest";
+import { deleteEmbeddingIndexManifest } from "./utils/embeddingIndexManifest";
 import * as path from "path";
 import { runIndexingJob } from "./ingestion/runIndexing";
 import { parseExcludePatternsBlock } from "./utils/fileExcludePatterns";
+import { resolveAdditionalExtensions } from "./utils/additionalExtensions";
+import { syncChatToolsSettingsForRest } from "./utils/effectivePluginConfig";
+import {
+  ensureVectorStore,
+  formatRagContext,
+  getCachedVectorStore,
+  retrievePassages,
+  summarizeText,
+} from "./rag/retrieval";
 
 /**
  * Check the abort signal and throw if the request has been cancelled.
@@ -34,23 +39,6 @@ function isAbortError(error: unknown): boolean {
   return false;
 }
 
-function summarizeText(text: string, maxLines: number = 3, maxChars: number = 400): string {
-  const lines = text.split(/\r?\n/).filter(line => line.trim() !== "");
-  const clippedLines = lines.slice(0, maxLines);
-  let clipped = clippedLines.join("\n");
-  if (clipped.length > maxChars) {
-    clipped = clipped.slice(0, maxChars);
-  }
-  const needsEllipsis =
-    lines.length > maxLines ||
-    text.length > clipped.length ||
-    clipped.length === maxChars && text.length > maxChars;
-  return needsEllipsis ? `${clipped.trimEnd()}…` : clipped;
-}
-
-// Global state for vector store (persists across requests)
-let vectorStore: VectorStore | null = null;
-let lastIndexedDir = "";
 let sanityChecksPassed = false;
 
 const RAG_CONTEXT_MACRO = "{{rag_context}}";
@@ -146,6 +134,7 @@ export async function preprocess(
 ): Promise<ChatMessage | string> {
   const userPrompt = userMessage.getText();
   const pluginConfig = ctl.getPluginConfig(configSchematics);
+  syncChatToolsSettingsForRest(pluginConfig);
 
   // Get configuration
   const documentsDir = pluginConfig.get("documentsDirectory");
@@ -161,6 +150,10 @@ export async function preprocess(
   const reindexRequested = pluginConfig.get("manualReindex.trigger");
   const resolvedEmbeddingModelId = resolveEmbeddingModelId(pluginConfig.get("embeddingModel"));
   const excludePatterns = parseExcludePatternsBlock(pluginConfig.get("excludeFilenamePatterns") ?? "");
+  const { additionalPlainTextSet: additionalPlainTextExtensions } = resolveAdditionalExtensions(
+    pluginConfig.get("additionalExtensions") ?? "",
+    (message) => console.warn(message),
+  );
 
   // Validate configuration
   if (!documentsDir || documentsDir === "") {
@@ -214,27 +207,23 @@ export async function preprocess(
     checkAbort(ctl.abortSignal);
 
     // Initialize vector store if needed
-    if (!vectorStore || lastIndexedDir !== vectorStoreDir) {
+    {
       const status = ctl.createStatus({
         status: "loading",
         text: "Initializing vector store...",
       });
 
-      vectorStore = new VectorStore(vectorStoreDir);
-      await vectorStore.initialize();
-      const statsAfterInit = await vectorStore.getStats();
-      if (statsAfterInit.totalChunks === 0) {
-        await deleteEmbeddingIndexManifest(vectorStoreDir);
-      }
-      console.info(
-        `[BigRAG] Vector store ready (path=${vectorStoreDir}). Waiting for queries...`,
-      );
-      lastIndexedDir = vectorStoreDir;
-
+      await ensureVectorStore(vectorStoreDir);
       status.setState({
         status: "done",
         text: "Vector store initialized",
       });
+    }
+
+    const vectorStore = getCachedVectorStore();
+    if (!vectorStore) {
+      console.error("[BigRAG] Vector store failed to initialize.");
+      return userMessage;
     }
 
     checkAbort(ctl.abortSignal);
@@ -251,6 +240,7 @@ export async function preprocess(
       parseDelayMs,
       reindexRequested,
       excludePatterns,
+      additionalPlainTextExtensions,
       skipPreviouslyIndexed: pluginConfig.get("manualReindex.skipPreviouslyIndexed"),
     });
 
@@ -283,6 +273,7 @@ export async function preprocess(
             autoReindex: false,
             parseDelayMs,
             excludePatterns,
+            additionalPlainTextExtensions,
             vectorStore,
             forceReindex: true,
             onProgress: (progress) => {
@@ -356,61 +347,45 @@ export async function preprocess(
       return noteAboutEmptyIndex + `\n\nUser Query:\n\n${userPrompt}`;
     }
 
-    // Perform retrieval
     const retrievalStatus = ctl.createStatus({
-      status: "loading",
-      text: `Loading embedding model for retrieval: ${resolvedEmbeddingModelId}`,
-    });
-
-    const embeddingModel = await ctl.client.embedding.model(resolvedEmbeddingModelId, {
-      signal: ctl.abortSignal,
-    });
-
-    checkAbort(ctl.abortSignal);
-
-    const compatibility = await checkEmbeddingModelForRetrieval({
-      vectorStoreDir,
-      resolvedModelId: resolvedEmbeddingModelId,
-      totalChunks: retrievalStats.totalChunks,
-      embeddingModel,
-    });
-    if (!compatibility.ok) {
-      retrievalStatus.setState({
-        status: "error",
-        text: compatibility.userMessage,
-      });
-      console.error("[BigRAG]", compatibility.logMessage);
-      return compatibility.userMessage + `\n\nUser Query:\n\n${userPrompt}`;
-    }
-
-    retrievalStatus.setState({
       status: "loading",
       text: "Searching for relevant content...",
     });
 
-    // Embed the query
-    const queryEmbeddingResult = await embeddingModel.embed(userPrompt);
-    checkAbort(ctl.abortSignal);
-    const queryEmbedding = queryEmbeddingResult.embedding;
-
-    // Search vector store
-    const queryPreview =
-      userPrompt.length > 160 ? `${userPrompt.slice(0, 160)}...` : userPrompt;
-    console.info(
-      `[BigRAG] Executing vector search for "${queryPreview}" (limit=${retrievalLimit}, threshold=${retrievalThreshold})`,
-    );
-    const results = await vectorStore.search(
-      queryEmbedding,
+    const retrievalResult = await retrievePassages({
+      client: ctl.client,
+      vectorStoreDir,
+      embeddingModelId: resolvedEmbeddingModelId,
+      query: userPrompt,
       retrievalLimit,
-      retrievalThreshold
-    );
-    checkAbort(ctl.abortSignal);
-    if (results.length > 0) {
-      const topHit = results[0];
-      console.info(
-        `[BigRAG] Vector search returned ${results.length} results. Top hit: file=${topHit.fileName} score=${topHit.score.toFixed(3)}`,
-      );
+      retrievalThreshold,
+      abortSignal: ctl.abortSignal,
+    });
 
+    checkAbort(ctl.abortSignal);
+
+    if (!retrievalResult.ok) {
+      retrievalStatus.setState({
+        status: retrievalResult.reason === "embedding-mismatch" ? "error" : "canceled",
+        text: retrievalResult.message,
+      });
+      if (retrievalResult.logMessage) {
+        console.error("[BigRAG]", retrievalResult.logMessage);
+      }
+      if (retrievalResult.reason === "embedding-mismatch") {
+        return retrievalResult.message + `\n\nUser Query:\n\n${userPrompt}`;
+      }
+      // empty-index fallback (e.g. index cleared between stats check and search)
+      const noteAboutEmptyIndex =
+        `Important: The document index is empty (no chunks stored yet). ` +
+        `In one short sentence, tell the user that nothing has been indexed. ` +
+        `Then answer their question to the best of your ability without claiming document retrieval.`;
+      return noteAboutEmptyIndex + `\n\nUser Query:\n\n${userPrompt}`;
+    }
+
+    const results = retrievalResult.passages;
+
+    if (results.length > 0) {
       const docSummaries = results
         .map(
           (result, idx) =>
@@ -418,8 +393,6 @@ export async function preprocess(
         )
         .join("\n");
       console.info(`[BigRAG] Relevant documents:\n${docSummaries}`);
-    } else {
-      console.warn("[BigRAG] Vector search returned 0 results.");
     }
 
     if (results.length === 0) {
@@ -436,7 +409,6 @@ export async function preprocess(
       return noteAboutNoResults + `\n\nUser Query:\n\n${userPrompt}`;
     }
 
-    // Format results
     retrievalStatus.setState({
       status: "done",
       text: `Retrieved ${results.length} relevant passages`,
@@ -444,28 +416,15 @@ export async function preprocess(
 
     ctl.debug("Retrieval results:", results);
 
-    let ragContextFull = "";
-    let ragContextPreview = "";
-    const prefix = "The following passages were found in your indexed documents:\n\n";
-    ragContextFull += prefix;
-    ragContextPreview += prefix;
-
-    let citationNumber = 1;
-    for (const result of results) {
-      const fileName = path.basename(result.filePath);
-      const citationLabel = `Citation ${citationNumber} (from ${fileName}, score: ${result.score.toFixed(3)}): `;
-      ragContextFull += `\n${citationLabel}"${result.text}"\n\n`;
-      ragContextPreview += `\n${citationLabel}"${summarizeText(result.text)}"\n\n`;
-      citationNumber++;
-    }
+    const { full: ragContextFull, preview: ragContextPreview } = formatRagContext(results);
 
     const promptTemplate = normalizePromptTemplate(pluginConfig.get("promptTemplate"));
     const finalPrompt = fillPromptTemplate(promptTemplate, {
-      [RAG_CONTEXT_MACRO]: ragContextFull.trimEnd(),
+      [RAG_CONTEXT_MACRO]: ragContextFull,
       [USER_QUERY_MACRO]: userPrompt,
     });
     const finalPromptPreview = fillPromptTemplate(promptTemplate, {
-      [RAG_CONTEXT_MACRO]: ragContextPreview.trimEnd(),
+      [RAG_CONTEXT_MACRO]: ragContextPreview,
       [USER_QUERY_MACRO]: userPrompt,
     });
 
@@ -521,6 +480,7 @@ interface ConfigReindexOpts {
   parseDelayMs: number;
   reindexRequested: boolean;
   excludePatterns: string[];
+  additionalPlainTextExtensions: ReadonlySet<string>;
   skipPreviouslyIndexed: boolean;
 }
 
@@ -536,6 +496,7 @@ async function maybeHandleConfigTriggeredReindex({
   parseDelayMs,
   reindexRequested,
   excludePatterns,
+  additionalPlainTextExtensions,
   skipPreviouslyIndexed,
 }: ConfigReindexOpts) {
   if (!reindexRequested) {
@@ -579,8 +540,9 @@ async function maybeHandleConfigTriggeredReindex({
       autoReindex: skipPreviouslyIndexed,
       parseDelayMs,
       excludePatterns,
+      additionalPlainTextExtensions,
       forceReindex: !skipPreviouslyIndexed,
-      vectorStore: vectorStore ?? undefined,
+      vectorStore: getCachedVectorStore() ?? undefined,
       onProgress: (progress) => {
         if (progress.status === "scanning") {
           status.setState({

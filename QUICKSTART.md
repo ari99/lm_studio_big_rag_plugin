@@ -36,10 +36,15 @@ This will start the plugin and register it with LM Studio.
 
 ### Step 4: Configure in LM Studio
 
-1. Open LM Studio
-2. Go to Settings → Plugins
-3. Find "Big RAG" plugin
-4. Configure the following:
+1. Open LM Studio and open a **Chat**
+2. Right sidebar → **Integrations** tab (hammer icon) — **not** Settings → Integrations
+3. Enable **Big RAG** (`mindstudio/big-rag`) in the list
+4. **Expand** the plugin row to show config fields at the bottom of the sidebar
+5. Fill in the fields (Documents Directory, Vector Store Directory, etc.)
+
+**Note:** Settings → Integrations (gear menu) is only for “skip tool confirmation”. Path settings are **not** there.
+
+For REST/curl: configure paths once in the chat sidebar (same fields as chat). Send **one chat message** so the plugin copies them to `~/.lmstudio/big-rag-tools-config.json` for curl. Or set `BIG_RAG_DOCS_DIR` / `BIG_RAG_DB_DIR` env vars.
 
 **Required Settings:**
 - **Documents Directory**: Path to your documents (e.g., `/Users/yourname/Documents/MyLibrary`)

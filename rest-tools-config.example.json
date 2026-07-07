@@ -1,0 +1,5 @@
+{
+  "documentsDirectory": "/absolute/path/to/documents",
+  "vectorStoreDirectory": "/absolute/path/to/vectorstore",
+  "embeddingModel": "text-embedding-mxbai-embed-large-v1"
+}
