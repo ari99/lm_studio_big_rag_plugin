@@ -6,7 +6,8 @@ A powerful RAG (Retrieval-Augmented Generation) plugin for LM Studio that can in
 
 - **Massive Scale**: Designed to handle large document collections (GB to TB scale)
 - **Deep Directory Scanning**: Recursively scans all subdirectories
-- **Multiple File Formats**: Supports HTM, HTML, XHTML, PDF, EPUB, TXT, TEXT, Markdown variants (MD/MDX/MKDN), BMP, JPEG, PNG
+- **Multiple File Formats**: Built-in support for PDF, EPUB, HTML, Markdown, plain text, images (OCR), and more
+- **User-defined extensions**: Index extra plain-text types (e.g. `.java`, `.py`, `.rs`) via the **Additional plain-text extensions** setting
 - **OCR Support**: Optional OCR for image files using Tesseract
 - **Vector Search**: Uses Vectra with sharded indexes for efficient vector storage and retrieval (avoids single-file size limits)
 - **Incremental Indexing**: Automatically detects and skips already-indexed files
@@ -15,11 +16,72 @@ A powerful RAG (Retrieval-Augmented Generation) plugin for LM Studio that can in
 
 ## Supported File Types
 
-- **Documents**: PDF, EPUB, TXT, TEXT
-- **Markdown**: MD, MDX, Markdown, MDown, MKD, MKDN
-- **Web Content**: HTM, HTML, XHTML
-- **Images** (with OCR): BMP, JPEG, JPG, PNG
-- **Archives**: RAR (planned - currently not implemented)
+### Built-in (no extra configuration)
+
+| Category | Extensions |
+|----------|------------|
+| Documents | `.pdf`, `.epub`, `.txt`, `.text` |
+| Markdown | `.md`, `.mdx`, `.markdown`, `.mkd`, `.mkdn`, `.mdown` |
+| Web | `.htm`, `.html`, `.xhtml` |
+| Images (OCR) | `.bmp`, `.jpeg`, `.jpg`, `.png` |
+
+PDF, EPUB, HTML, and images use dedicated parsers. Plain-text and Markdown files use the text parser.
+
+### Additional plain-text extensions (user-configured)
+
+Any other **plain-text** extension can be indexed by listing it in **Additional plain-text extensions** in the chat Integrations sidebar (or via `BIG_RAG_ADDITIONAL_EXTENSIONS` for CLI indexing).
+
+Common examples:
+
+```
+.java
+.cs
+.py
+.rs
+.go
+.ts
+.tsx
+.js
+.jsx
+.c
+.cpp
+.h
+.sql
+.yaml
+.toml
+```
+
+**Format rules:**
+
+- One extension per line, or comma-separated on one line
+- With or without a leading dot (`.java` and `java` both work)
+- Lines starting with `#` are comments; inline `#` after an extension is also stripped
+- Wildcards (`*`, `?`) are not allowed
+
+**Rejected automatically:** binaries and formats that already have dedicated parsers or are unsafe to read as text — e.g. `.exe`, `.zip`, `.jar`, `.docx`, `.pdf`, `.png`. Rejections are logged as `[BigRAG] Rejected additional extension …` in developer logs.
+
+**After changing extensions:** trigger a reindex (empty vector store + chat message, or **Manual Reindex Trigger** ON) so new file types are picked up. Pair with **Exclude filename patterns** when indexing source trees:
+
+```
+node_modules/**
+target/**
+bin/**
+dist/**
+.git/**
+```
+
+**CLI / headless indexing:**
+
+```bash
+BIG_RAG_ADDITIONAL_EXTENSIONS=".java;.cs;.py" \
+BIG_RAG_DOCS_DIR=/path/to/repo \
+BIG_RAG_DB_DIR=/path/to/vectorstore \
+npm run index
+```
+
+### Not yet supported
+
+- **RAR archives**: listed in built-in types but not implemented (files are skipped)
 
 ## Installation
 
@@ -99,9 +161,9 @@ The plugin provides the following configuration options:
 ### File indexing filters
 
 - **Exclude filename patterns**: Optional globs (one per line) matched against paths relative to the Documents Directory. Example: `*.png`, `node_modules/**`, `target/**`. Applied after the extension gate; does not remove chunks already in the vector store.
-- **Additional plain-text extensions**: Optional list of extra extensions to index as plain text (one per line), for example `.java`, `.cs`, or `.py`. Built-in types such as PDF, EPUB, and HTML keep their dedicated parsers and do not need to be listed. Binary extensions (`.exe`, `.zip`, etc.) are rejected. Pair with exclude patterns when indexing source trees, e.g. `node_modules/**`, `target/**`, `bin/**`.
+- **Additional plain-text extensions**: See [Additional plain-text extensions](#additional-plain-text-extensions-user-configured) above. Configured in the same sidebar block; files matching listed extensions are read as UTF-8 plain text and chunked like `.txt`.
 
-CLI equivalents: `BIG_RAG_EXCLUDE_PATTERNS` and `BIG_RAG_ADDITIONAL_EXTENSIONS` (semicolon-separated).
+CLI equivalents: `BIG_RAG_EXCLUDE_PATTERNS` and `BIG_RAG_ADDITIONAL_EXTENSIONS` (semicolon-separated for env vars).
 
 ### Reindexing Controls
 
@@ -227,6 +289,32 @@ curl -s http://127.0.0.1:1234/api/v1/chat \
 - Prefer `/api/v1/chat` over OpenAI-compatible `/v1/chat/completions` for plugin integrations.
 - Use the same **Embedding Model** for indexing and retrieval; reindex after changing models.
 
+## Common Use Cases
+
+**Source code / repo RAG**
+
+Point **Documents Directory** at a project root, add extensions, and exclude build artifacts:
+
+```
+Additional plain-text extensions:
+.java
+.py
+.ts
+.tsx
+
+Exclude filename patterns:
+node_modules/**
+target/**
+dist/**
+.git/**
+```
+
+Reindex after changing extensions. Check developer logs for `[Scanner] Additional plain-text extensions: …` on startup.
+
+**Technical documentation**
+
+Larger **Chunk Size** (1024) and default retrieval settings work well for manuals and API docs.
+
 ## Architecture
 
 ### Components
@@ -313,6 +401,13 @@ curl -s http://127.0.0.1:1234/api/v1/chat \
 - Try lowering the retrieval affinity threshold
 - Check LM Studio logs for errors
 
+### Additional extensions not indexed
+
+- Confirm extensions are listed in **Additional plain-text extensions** (sidebar) or `BIG_RAG_ADDITIONAL_EXTENSIONS`
+- Check logs for `[BigRAG] Rejected additional extension` (binary/built-in types are blocked)
+- Reindex after adding new extensions — existing index does not retroactively scan new types
+- Use **Exclude filename patterns** if files live under ignored folders (`node_modules/**`, etc.)
+
 ### Embedding model mismatch
 
 - If you see a message that the index was built with a **different embedding model** than the one in settings, either change **Embedding Model** back to the value recorded in `.big-rag-embedding.json` or run a **full reindex** after changing the model.
@@ -372,6 +467,7 @@ big-rag-plugin/
 │   ├── vectorstore/
 │   │   └── vectorStore.ts     # Vectra sharded index integration
 │   └── utils/
+│       ├── additionalExtensions.ts  # User-defined plain-text extension parsing
 │       ├── coerceEmbedding.ts       # Normalize embedding API vectors
 │       ├── embeddingIndexManifest.ts # Index embedding metadata on disk
 │       ├── fileHash.ts              # File hashing
