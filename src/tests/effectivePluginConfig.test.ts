@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { DEFAULT_EMBEDDING_MODEL_ID } from "../config.js";
 import {
   mergeChatAndSyncedFileSettingsForTest,
+  mergeEmbeddingModelPreference,
   mergeToolsPluginSettingsWithFallbacks,
   pickNonEmptyString,
 } from "../utils/effectivePluginConfig.js";
@@ -31,7 +33,7 @@ test("mergeChatAndSyncedFileSettings uses synced file when chat paths are empty"
   assert.equal(merged.retrievalLimit, 8);
 });
 
-test("mergeChatAndSyncedFileSettings prefers chat paths when set", () => {
+test("mergeChatAndSyncedFileSettings prefers chat paths when both are set", () => {
   const merged = mergeChatAndSyncedFileSettingsForTest(
     {
       documentsDirectory: "/chat/docs",
@@ -50,7 +52,7 @@ test("mergeChatAndSyncedFileSettings prefers chat paths when set", () => {
   assert.equal(merged.retrievalLimit, 3);
 });
 
-test("mergeChatAndSyncedFileSettings fills missing chat path from synced file", () => {
+test("mergeChatAndSyncedFileSettings ignores partial chat paths to avoid cross-project mix", () => {
   const merged = mergeChatAndSyncedFileSettingsForTest(
     {
       documentsDirectory: "/chat/docs",
@@ -62,8 +64,44 @@ test("mergeChatAndSyncedFileSettings fills missing chat path from synced file", 
     },
   );
 
-  assert.equal(merged.documentsDirectory, "/chat/docs");
+  assert.equal(merged.documentsDirectory, "/synced/docs");
   assert.equal(merged.vectorStoreDirectory, "/synced/store");
+});
+
+test("mergeEmbeddingModelPreference keeps custom synced model over chat default", () => {
+  assert.equal(
+    mergeEmbeddingModelPreference(
+      DEFAULT_EMBEDDING_MODEL_ID,
+      "text-embedding-mxbai-embed-large-v1",
+    ),
+    "text-embedding-mxbai-embed-large-v1",
+  );
+  assert.equal(
+    mergeEmbeddingModelPreference(
+      "text-embedding-custom",
+      "text-embedding-mxbai-embed-large-v1",
+    ),
+    "text-embedding-custom",
+  );
+});
+
+test("mergeChatAndSyncedFileSettings does not clobber synced embedding with chat default", () => {
+  const merged = mergeChatAndSyncedFileSettingsForTest(
+    {
+      documentsDirectory: "/chat/docs",
+      vectorStoreDirectory: "/chat/store",
+      embeddingModel: DEFAULT_EMBEDDING_MODEL_ID,
+    },
+    {
+      documentsDirectory: "/synced/docs",
+      vectorStoreDirectory: "/synced/store",
+      embeddingModel: "text-embedding-mxbai-embed-large-v1",
+    },
+  );
+
+  assert.equal(merged.embeddingModel, "text-embedding-mxbai-embed-large-v1");
+  assert.equal(merged.documentsDirectory, "/chat/docs");
+  assert.equal(merged.vectorStoreDirectory, "/chat/store");
 });
 
 test("mergeToolsPluginSettingsWithFallbacks uses file and env layers", () => {

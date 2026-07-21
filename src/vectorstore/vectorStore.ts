@@ -130,7 +130,7 @@ export class VectorStore {
         this.activeShard!.cancelUpdate();
         throw e;
       }
-      this.activeShardCount += chunks.length;
+      this.activeShardCount = (await this.activeShard!.listItems()).length;
       console.log(`Added ${chunks.length} chunks to vector store`);
 
       if (this.activeShardCount >= MAX_ITEMS_PER_SHARD) {
@@ -189,14 +189,43 @@ export class VectorStore {
    * Delete all chunks for a file (by hash) across all shards.
    */
   async deleteByFileHash(fileHash: string): Promise<void> {
+    return this.deleteChunksMatching(
+      (metadata: ChunkMetadata): boolean => metadata.fileHash === fileHash,
+      `file hash: ${fileHash}`,
+    );
+  }
+
+  /**
+   * Delete all chunks for a source path across all shards (all prior hashes).
+   */
+  async deleteByFilePath(filePath: string): Promise<void> {
+    const resolvedPath: string = path.resolve(filePath);
+    return this.deleteChunksMatching((metadata: ChunkMetadata): boolean => {
+      const itemPath: string = metadata.filePath ?? "";
+      if (itemPath === filePath || itemPath === resolvedPath) {
+        return true;
+      }
+      try {
+        return path.resolve(itemPath) === resolvedPath;
+      } catch {
+        return false;
+      }
+    }, `file path: ${filePath}`);
+  }
+
+  private async deleteChunksMatching(
+    predicate: (metadata: ChunkMetadata) => boolean,
+    logLabel: string,
+  ): Promise<void> {
     const lastDir = this.shardDirs[this.shardDirs.length - 1];
     this.updateMutex = this.updateMutex.then(async () => {
       for (const dir of this.shardDirs) {
         const shard = this.openShard(dir);
         const items = await shard.listItems();
-        const toDelete = items.filter(
-          (i) => (i.metadata as ChunkMetadata)?.fileHash === fileHash,
-        );
+        const toDelete = items.filter((item) => {
+          const metadata = item.metadata as ChunkMetadata | undefined;
+          return metadata !== undefined && predicate(metadata);
+        });
         if (toDelete.length > 0) {
           await shard.beginUpdate();
           for (const item of toDelete) {
@@ -208,7 +237,7 @@ export class VectorStore {
           }
         }
       }
-      console.log(`Deleted chunks for file hash: ${fileHash}`);
+      console.log(`Deleted chunks for ${logLabel}`);
     });
     return this.updateMutex;
   }

@@ -81,7 +81,7 @@ export const configSchematics = createConfigSchematics()
       min: 128,
       max: 2048,
       displayName: "Chunk Size",
-      subtitle: "Size of text chunks for embedding (in tokens).",
+      subtitle: "Size of text chunks for embedding (in words).",
       slider: { min: 128, max: 2048, step: 128 },
     },
     512,
@@ -94,7 +94,7 @@ export const configSchematics = createConfigSchematics()
       min: 0,
       max: 512,
       displayName: "Chunk Overlap",
-      subtitle: "Overlap between consecutive chunks (in tokens).",
+      subtitle: "Overlap between consecutive chunks (in words).",
       slider: { min: 0, max: 512, step: 32 },
     },
     100,
@@ -164,7 +164,7 @@ export const configSchematics = createConfigSchematics()
     {
       displayName: "Manual Reindex Trigger",
       subtitle:
-        "Toggle ON to request an immediate reindex. The plugin resets this after running. Use the “Skip Previously Indexed Files” option below to control whether unchanged files are skipped.",
+        "Toggle ON to reindex on the next chat message. Turn it OFF again afterward (it does not auto-reset). Use “Skip Previously Indexed Files” to skip unchanged files.",
     },
     false,
   )

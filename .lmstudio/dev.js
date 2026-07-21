@@ -105,7 +105,7 @@ User Query:
         min: 128,
         max: 2048,
         displayName: "Chunk Size",
-        subtitle: "Size of text chunks for embedding (in tokens).",
+        subtitle: "Size of text chunks for embedding (in words).",
         slider: { min: 128, max: 2048, step: 128 }
       },
       512
@@ -117,7 +117,7 @@ User Query:
         min: 0,
         max: 512,
         displayName: "Chunk Overlap",
-        subtitle: "Overlap between consecutive chunks (in tokens).",
+        subtitle: "Overlap between consecutive chunks (in words).",
         slider: { min: 0, max: 512, step: 32 }
       },
       100
@@ -178,7 +178,7 @@ User Query:
       "boolean",
       {
         displayName: "Manual Reindex Trigger",
-        subtitle: "Toggle ON to request an immediate reindex. The plugin resets this after running. Use the \u201CSkip Previously Indexed Files\u201D option below to control whether unchanged files are skipped."
+        subtitle: "Toggle ON to reindex on the next chat message. Turn it OFF again afterward (it does not auto-reset). Use \u201CSkip Previously Indexed Files\u201D to skip unchanged files."
       },
       false
     ).field(
@@ -893,7 +893,7 @@ async function tryLmStudioParser(filePath, client2) {
         console.warn(
           `[PDF Parser] (LM Studio) WebSocket error on ${fileName}, retrying (${attempt}/${maxRetries})...`
         );
-        await new Promise((resolve5) => setTimeout(resolve5, 1e3 * attempt));
+        await new Promise((resolve6) => setTimeout(resolve6, 1e3 * attempt));
         continue;
       }
       console.error(`[PDF Parser] (LM Studio) Error parsing PDF file ${filePath}:`, error);
@@ -1249,12 +1249,12 @@ var init_pdfParser = __esm({
 
 // src/parsers/epubParser.ts
 async function parseEPUB(filePath) {
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve6, reject) => {
     try {
       const epub = new import_epub2.EPub(filePath);
       epub.on("error", (error) => {
         console.error(`Error parsing EPUB file ${filePath}:`, error);
-        resolve5("");
+        resolve6("");
       });
       const stripHtml = (input) => input.replace(/<[^>]*>/g, " ");
       const getManifestEntry = (chapterId) => {
@@ -1334,18 +1334,18 @@ async function parseEPUB(filePath) {
             }
           }
           const fullText = textParts.join("\n\n");
-          resolve5(
+          resolve6(
             fullText.replace(/\s+/g, " ").replace(/\n+/g, "\n").trim()
           );
         } catch (error) {
           console.error(`Error processing EPUB chapters:`, error);
-          resolve5("");
+          resolve6("");
         }
       });
       epub.parse();
     } catch (error) {
       console.error(`Error initializing EPUB parser for ${filePath}:`, error);
-      resolve5("");
+      resolve6("");
     }
   });
 }
@@ -1598,11 +1598,11 @@ var init_textChunker = __esm({
 
 // src/utils/fileHash.ts
 async function calculateFileHash(filePath) {
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve6, reject) => {
     const hash = crypto.createHash("sha256");
     const stream = fs7.createReadStream(filePath);
     stream.on("data", (data) => hash.update(data));
-    stream.on("end", () => resolve5(hash.digest("hex")));
+    stream.on("end", () => resolve6(hash.digest("hex")));
     stream.on("error", reject);
   });
 }
@@ -1928,7 +1928,7 @@ var init_indexManager = __esm({
             }
           }
           if (this.options.parseDelayMs > 0) {
-            await new Promise((resolve5) => setTimeout(resolve5, this.options.parseDelayMs));
+            await new Promise((resolve6) => setTimeout(resolve6, this.options.parseDelayMs));
           }
           const parsedResult = await parseDocument(
             file.path,
@@ -1992,13 +1992,11 @@ var init_indexManager = __esm({
             return { type: "failed" };
           }
           try {
+            await vectorStore.deleteByFilePath(file.path);
+            fileInventory.set(file.path, /* @__PURE__ */ new Set());
             await vectorStore.addChunks(documentChunks);
             console.log(`Indexed ${documentChunks.length} chunks from ${file.name}`);
-            if (!existingHashes) {
-              fileInventory.set(file.path, /* @__PURE__ */ new Set([fileHash]));
-            } else {
-              existingHashes.add(fileHash);
-            }
+            fileInventory.set(file.path, /* @__PURE__ */ new Set([fileHash]));
             await this.failedFileRegistry.clearFailure(file.path);
             return {
               type: "indexed",
@@ -2035,8 +2033,7 @@ var init_indexManager = __esm({
       async reindexFile(filePath) {
         const { vectorStore } = this.options;
         try {
-          const fileHash = await calculateFileHash(filePath);
-          await vectorStore.deleteByFileHash(fileHash);
+          await vectorStore.deleteByFilePath(filePath);
           const file = {
             path: filePath,
             name: filePath.split("/").pop() || filePath,
@@ -2190,7 +2187,7 @@ var init_vectorStore = __esm({
             this.activeShard.cancelUpdate();
             throw e;
           }
-          this.activeShardCount += chunks.length;
+          this.activeShardCount = (await this.activeShard.listItems()).length;
           console.log(`Added ${chunks.length} chunks to vector store`);
           if (this.activeShardCount >= MAX_ITEMS_PER_SHARD) {
             const nextNum = this.shardDirs.length;
@@ -2238,14 +2235,38 @@ var init_vectorStore = __esm({
        * Delete all chunks for a file (by hash) across all shards.
        */
       async deleteByFileHash(fileHash) {
+        return this.deleteChunksMatching(
+          (metadata) => metadata.fileHash === fileHash,
+          `file hash: ${fileHash}`
+        );
+      }
+      /**
+       * Delete all chunks for a source path across all shards (all prior hashes).
+       */
+      async deleteByFilePath(filePath) {
+        const resolvedPath = path6.resolve(filePath);
+        return this.deleteChunksMatching((metadata) => {
+          const itemPath = metadata.filePath ?? "";
+          if (itemPath === filePath || itemPath === resolvedPath) {
+            return true;
+          }
+          try {
+            return path6.resolve(itemPath) === resolvedPath;
+          } catch {
+            return false;
+          }
+        }, `file path: ${filePath}`);
+      }
+      async deleteChunksMatching(predicate, logLabel) {
         const lastDir = this.shardDirs[this.shardDirs.length - 1];
         this.updateMutex = this.updateMutex.then(async () => {
           for (const dir of this.shardDirs) {
             const shard = this.openShard(dir);
             const items = await shard.listItems();
-            const toDelete = items.filter(
-              (i) => i.metadata?.fileHash === fileHash
-            );
+            const toDelete = items.filter((item) => {
+              const metadata = item.metadata;
+              return metadata !== void 0 && predicate(metadata);
+            });
             if (toDelete.length > 0) {
               await shard.beginUpdate();
               for (const item of toDelete) {
@@ -2257,7 +2278,7 @@ var init_vectorStore = __esm({
               }
             }
           }
-          console.log(`Deleted chunks for file hash: ${fileHash}`);
+          console.log(`Deleted chunks for ${logLabel}`);
         });
         return this.updateMutex;
       }
@@ -2412,7 +2433,15 @@ function pickNonEmptyString(primary, fallback) {
   return (fallback ?? "").trim();
 }
 function chatPathsConfigured(chatConfig) {
-  return pickNonEmptyString(chatConfig.get("documentsDirectory"), "") !== "" || pickNonEmptyString(chatConfig.get("vectorStoreDirectory"), "") !== "";
+  return pickNonEmptyString(chatConfig.get("documentsDirectory"), "") !== "" && pickNonEmptyString(chatConfig.get("vectorStoreDirectory"), "") !== "";
+}
+function mergeEmbeddingModelPreference(chatEmbedding, syncedEmbedding) {
+  const chatResolved = resolveEmbeddingModelId(chatEmbedding);
+  const syncedTrimmed = (syncedEmbedding ?? "").trim();
+  if (syncedTrimmed !== "" && resolveEmbeddingModelId(syncedTrimmed) !== DEFAULT_EMBEDDING_MODEL_ID && chatResolved === DEFAULT_EMBEDDING_MODEL_ID) {
+    return resolveEmbeddingModelId(syncedTrimmed);
+  }
+  return chatResolved;
 }
 function pickFirstNonEmptyString(...values) {
   for (const value of values) {
@@ -2539,7 +2568,7 @@ function mergeChatWithSyncedFallback(chatSettings, syncedSettings) {
       chatSettings.vectorStoreDirectory,
       syncedLayer.vectorStoreDirectory
     ),
-    embeddingModel: pickFirstNonEmptyString(
+    embeddingModel: mergeEmbeddingModelPreference(
       chatSettings.embeddingModel,
       syncedLayer.embeddingModel
     ),
@@ -2606,7 +2635,12 @@ function getCachedVectorStore() {
 }
 async function ensureVectorStore(vectorStoreDir) {
   const resolvedDir = path7.resolve(vectorStoreDir);
-  if (!cachedVectorStore || lastVectorStoreDir !== resolvedDir) {
+  let openedStore = null;
+  const openWork = vectorStoreOpenMutex.catch(() => void 0).then(async () => {
+    if (cachedVectorStore && lastVectorStoreDir === resolvedDir) {
+      openedStore = cachedVectorStore;
+      return;
+    }
     if (cachedVectorStore !== null && lastVectorStoreDir !== resolvedDir) {
       await cachedVectorStore.close();
     }
@@ -2618,8 +2652,17 @@ async function ensureVectorStore(vectorStoreDir) {
     }
     console.info(`[BigRAG] Vector store ready (path=${resolvedDir}). Waiting for queries...`);
     lastVectorStoreDir = resolvedDir;
+    openedStore = cachedVectorStore;
+  });
+  vectorStoreOpenMutex = openWork.then(
+    () => void 0,
+    () => void 0
+  );
+  await openWork;
+  if (openedStore === null) {
+    throw new Error(`Failed to open vector store at ${resolvedDir}`);
   }
-  return cachedVectorStore;
+  return openedStore;
 }
 function summarizeText(text, maxLines = 3, maxChars = 400) {
   const lines = text.split(/\r?\n/).filter((line) => line.trim() !== "");
@@ -2731,9 +2774,6 @@ async function retrievePassages(params) {
 }
 async function getIndexStatus(params) {
   const { documentsDirectory, vectorStoreDirectory, embeddingModelId } = params;
-  if (!documentsDirectory.trim()) {
-    return { error: "Documents directory is not configured." };
-  }
   if (!vectorStoreDirectory.trim()) {
     return { error: "Vector store directory is not configured." };
   }
@@ -2747,7 +2787,7 @@ async function getIndexStatus(params) {
     uniqueFiles: stats.uniqueFiles
   };
 }
-var path7, cachedVectorStore, lastVectorStoreDir;
+var path7, cachedVectorStore, lastVectorStoreDir, vectorStoreOpenMutex;
 var init_retrieval = __esm({
   "src/rag/retrieval.ts"() {
     "use strict";
@@ -2757,6 +2797,7 @@ var init_retrieval = __esm({
     init_embeddingIndexManifest();
     cachedVectorStore = null;
     lastVectorStoreDir = "";
+    vectorStoreOpenMutex = Promise.resolve();
   }
 });
 
@@ -2869,7 +2910,10 @@ async function preprocess(ctl, userMessage) {
     return userMessage;
   }
   try {
-    if (!sanityChecksPassed) {
+    const resolvedDocumentsDir = path8.resolve(documentsDir);
+    const resolvedVectorStoreDir = path8.resolve(vectorStoreDir);
+    const pathsChangedForSanity = resolvedDocumentsDir !== lastSanityCheckedDocumentsDir || resolvedVectorStoreDir !== lastSanityCheckedVectorStoreDir;
+    if (!sanityChecksPassed || pathsChangedForSanity) {
       const checkStatus = ctl.createStatus({
         status: "loading",
         text: "Performing sanity checks..."
@@ -2894,6 +2938,8 @@ async function preprocess(ctl, userMessage) {
         text: "Sanity checks passed"
       });
       sanityChecksPassed = true;
+      lastSanityCheckedDocumentsDir = resolvedDocumentsDir;
+      lastSanityCheckedVectorStoreDir = resolvedVectorStoreDir;
     }
     checkAbort(ctl.abortSignal);
     {
@@ -3251,7 +3297,7 @@ async function notifyManualResetNeeded(ctl, embeddingModelId) {
     console.warn("[BigRAG] Unable to send notification about manual reindex reset:", error);
   }
 }
-var path8, sanityChecksPassed, RAG_CONTEXT_MACRO, USER_QUERY_MACRO;
+var path8, sanityChecksPassed, lastSanityCheckedDocumentsDir, lastSanityCheckedVectorStoreDir, RAG_CONTEXT_MACRO, USER_QUERY_MACRO;
 var init_promptPreprocessor = __esm({
   "src/promptPreprocessor.ts"() {
     "use strict";
@@ -3266,6 +3312,8 @@ var init_promptPreprocessor = __esm({
     init_effectivePluginConfig();
     init_retrieval();
     sanityChecksPassed = false;
+    lastSanityCheckedDocumentsDir = "";
+    lastSanityCheckedVectorStoreDir = "";
     RAG_CONTEXT_MACRO = "{{rag_context}}";
     USER_QUERY_MACRO = "{{user_query}}";
   }
@@ -3310,33 +3358,25 @@ async function provideTools(ctl) {
         return `Error: ${result.message}`;
       }
       if (result.passages.length === 0) {
-        return JSON.stringify(
-          {
-            query: trimmedQuery,
-            passageCount: 0,
-            passages: [],
-            message: "No relevant content found in indexed documents for this query."
-          },
-          null,
-          2
-        );
-      }
-      return JSON.stringify(
-        {
+        return {
           query: trimmedQuery,
-          passageCount: result.passages.length,
-          passages: result.passages.map((passage, index) => ({
-            rank: index + 1,
-            fileName: passage.fileName,
-            filePath: passage.filePath,
-            score: passage.score,
-            shardName: passage.shardName,
-            text: passage.text
-          }))
-        },
-        null,
-        2
-      );
+          passageCount: 0,
+          passages: [],
+          message: "No relevant content found in indexed documents for this query."
+        };
+      }
+      return {
+        query: trimmedQuery,
+        passageCount: result.passages.length,
+        passages: result.passages.map((passage, index) => ({
+          rank: index + 1,
+          fileName: passage.fileName,
+          filePath: passage.filePath,
+          score: passage.score,
+          shardName: passage.shardName,
+          text: passage.text
+        }))
+      };
     }
   });
   const statusTool = (0, import_sdk2.tool)({
@@ -3357,7 +3397,7 @@ async function provideTools(ctl) {
       if ("error" in indexStatus) {
         return `Error: ${indexStatus.error} Set paths in chat Integrations sidebar (syncs for REST on first message), or BIG_RAG_DOCS_DIR / BIG_RAG_DB_DIR env vars.`;
       }
-      return JSON.stringify(indexStatus, null, 2);
+      return indexStatus;
     }
   });
   return [searchTool, statusTool];

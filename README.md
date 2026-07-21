@@ -150,8 +150,8 @@ The plugin provides the following configuration options:
 
 - **Retrieval Limit** (1-20, default: 5): Maximum number of chunks to return
 - **Retrieval Affinity Threshold** (0.0-1.0, default: 0.5): Minimum similarity score for relevance
-- **Chunk Size** (128-2048 tokens, default: 512): Size of text chunks for embedding
-- **Chunk Overlap** (0-512 tokens, default: 100): Overlap between consecutive chunks
+- **Chunk Size** (128-2048 words, default: 512): Size of text chunks for embedding
+- **Chunk Overlap** (0-512 words, default: 100): Overlap between consecutive chunks
 
 ### Performance Settings
 
@@ -206,11 +206,11 @@ Big RAG registers a **prompt preprocessor** (automatic RAG in chat) and a **tool
 
 REST tool calls have **no chat session**, so they do not read the sidebar directly. Paths come from (in order):
 
-1. Chat sidebar values, merged and synced to `~/.lmstudio/big-rag-tools-config.json` when the **prompt preprocessor runs** (send at least one chat message with Big RAG enabled after configuring paths).
-2. That synced JSON file (persists until deleted).
+1. Chat sidebar values, merged and synced to `~/.lmstudio/big-rag-tools-config.json` when the **prompt preprocessor runs** — both **Documents Directory** and **Vector Store Directory** must be set in chat for that sync to write. Send at least one chat message with Big RAG enabled after configuring paths.
+2. That synced JSON file (persists until deleted). A custom embedding model already in the sync file is **not** overwritten by the chat schematic default.
 3. Environment variables on the **LM Studio process**: `BIG_RAG_DOCS_DIR`, `BIG_RAG_DB_DIR`, optional `BIG_RAG_EMBEDDING_MODEL`, `BIG_RAG_RETRIEVAL_LIMIT`, `BIG_RAG_RETRIEVAL_AFFINITY_THRESHOLD`.
 
-If you delete the JSON file, send a chat message again or set the env vars before calling tools via curl.
+If you delete the JSON file, send a chat message again (with both paths set) or set the env vars before calling tools via curl.
 
 ### Native REST API (`/api/v1/chat`)
 
@@ -278,7 +278,7 @@ curl -s http://127.0.0.1:1234/api/v1/chat \
 | Tool | Description |
 |------|-------------|
 | `big_rag_search` | Embed a query and return matching passages (JSON with scores and file names) |
-| `big_rag_index_status` | Return chunk count, unique file count, and configured directory paths |
+| `big_rag_index_status` | Return chunk count, unique file count, and configured directory paths (needs vector store path; documents path is optional metadata) |
 
 ### REST limitations (observed behavior)
 
@@ -286,8 +286,22 @@ curl -s http://127.0.0.1:1234/api/v1/chat \
 - **Large tool outputs**: `big_rag_search` with `limit=10` returns full passage text and can exceed the model context window (e.g. 14848 tokens). Ask for `limit 3` or increase context length in LM Studio.
 - **Permission denied**: enable “Allow calling servers from mcp.json” and use a valid API token.
 - **“Vector store / Documents directory is not configured”**: sync config via a chat message, restore `~/.lmstudio/big-rag-tools-config.json`, or set `BIG_RAG_DOCS_DIR` / `BIG_RAG_DB_DIR`.
-- Prefer `/api/v1/chat` over OpenAI-compatible `/v1/chat/completions` for plugin integrations.
+- Prefer `/api/v1/chat` over OpenAI-compatible `/v1/chat/completions` for plugin integrations. LM Studio does not support `integrations` on `/v1/chat/completions`. For OpenAI SDKs, use the proxy that ships **in this package**: `npm run proxy` (see [`OPENAI_PROXY.md`](OPENAI_PROXY.md)), base URL `http://127.0.0.1:1235/v1`.
 - Use the same **Embedding Model** for indexing and retrieval; reindex after changing models.
+
+### OpenAI-compatible proxy (ships with this plugin)
+
+LM Studio does **not** support plugin `integrations` on `/v1/chat/completions`. This package includes a small proxy that rewrites those requests to native `/api/v1/chat` with your Big RAG plugin enabled. Other `/v1/*` routes (models, embeddings, …) are forwarded unchanged to LM Studio.
+
+Prerequisites: same as native REST (app open, plugin installed/configured, token + mcp.json permission as needed).
+
+```bash
+cd big-rag-plugin
+npm run proxy
+# Point OpenAI clients at base_url = http://127.0.0.1:1235/v1
+```
+
+Hub install enables the plugin in LM Studio; start the proxy separately when an OpenAI SDK needs `/v1/chat/completions`. Details and env vars: [`OPENAI_PROXY.md`](OPENAI_PROXY.md).
 
 ## Common Use Cases
 
@@ -354,6 +368,9 @@ Larger **Chunk Size** (1024) and default retrieval settings work well for manual
 7. **Tools Provider** (`src/toolsProvider.ts`):
    - Exposes `big_rag_search` and `big_rag_index_status` for REST API / agent integrations
 
+8. **OpenAI proxy** (`src/openaiProxy/`):
+   - Optional Node process (`npm run proxy`) for OpenAI SDK clients; see [`OPENAI_PROXY.md`](OPENAI_PROXY.md)
+
 ## Performance Considerations
 
 ### Large Datasets
@@ -374,9 +391,10 @@ Larger **Chunk Size** (1024) and default retrieval settings work well for manual
 
 ### REST: “Documents / Vector store directory is not configured”
 
-- Configure paths in the **chat Integrations sidebar**, then send **one chat message** to sync to `~/.lmstudio/big-rag-tools-config.json`.
+- Configure **both** paths in the **chat Integrations sidebar**, then send **one chat message** to sync to `~/.lmstudio/big-rag-tools-config.json`.
 - Or set `BIG_RAG_DOCS_DIR` and `BIG_RAG_DB_DIR` on the LM Studio process.
 - Ensure REST uses `"mindstudio/big-rag"` and the plugin is installed (`lms dev --install -y`).
+- `big_rag_index_status` only requires the vector store path; search still needs a usable index (and usually docs paths for indexing).
 
 ### REST: `tool_format_generation_error`
 
@@ -454,6 +472,10 @@ big-rag-plugin/
 │   ├── config.ts              # Plugin configuration schema
 │   ├── index.ts               # Main entry point
 │   ├── promptPreprocessor.ts  # RAG integration
+│   ├── toolsProvider.ts       # REST tools (search + index status)
+│   ├── openaiProxy/           # OpenAI-compatible proxy (npm run proxy)
+│   ├── rag/
+│   │   └── retrieval.ts       # Shared search / vector store cache
 │   ├── ingestion/
 │   │   ├── fileScanner.ts     # Directory scanning
 │   │   └── indexManager.ts    # Indexing orchestration
@@ -469,12 +491,14 @@ big-rag-plugin/
 │   └── utils/
 │       ├── additionalExtensions.ts  # User-defined plain-text extension parsing
 │       ├── coerceEmbedding.ts       # Normalize embedding API vectors
+│       ├── effectivePluginConfig.ts # Chat ↔ REST tools config sync
 │       ├── embeddingIndexManifest.ts # Index embedding metadata on disk
 │       ├── fileHash.ts              # File hashing
-│       └── textChunker.ts           # Text chunking
+│       └── textChunker.ts           # Text chunking (by words)
 ├── manifest.json              # Plugin manifest
 ├── package.json               # Dependencies
 ├── tsconfig.json              # TypeScript config
+├── OPENAI_PROXY.md            # OpenAI proxy usage
 └── README.md                  # This file
 ```
 
@@ -482,9 +506,10 @@ big-rag-plugin/
 
 See **Manual testing** at the top of this README. Summary:
 
-- `npm test` — unit tests (extensions, parsers, retrieval helpers)
+- `npm test` — unit tests (extensions, parsers, retrieval helpers, OpenAI proxy translators)
 - `npm run dev` + LM Studio chat — E2E UI (dev plugin)
 - `npm run build && lms dev --install -y` + curl to `/api/v1/chat` — E2E REST (installed plugin id `mindstudio/big-rag`; config synced via chat message or env vars)
+- `npm run proxy` — OpenAI-shaped API on port 1235 (requires LM Studio + installed plugin as for REST)
 
 ### Contributing
 

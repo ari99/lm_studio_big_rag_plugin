@@ -40,6 +40,8 @@ function isAbortError(error: unknown): boolean {
 }
 
 let sanityChecksPassed = false;
+let lastSanityCheckedDocumentsDir = "";
+let lastSanityCheckedVectorStoreDir = "";
 
 const RAG_CONTEXT_MACRO = "{{rag_context}}";
 const USER_QUERY_MACRO = "{{user_query}}";
@@ -167,8 +169,13 @@ export async function preprocess(
   }
 
   try {
-    // Perform sanity checks on first run
-    if (!sanityChecksPassed) {
+    // Re-run sanity checks when paths change or on first run.
+    const resolvedDocumentsDir = path.resolve(documentsDir);
+    const resolvedVectorStoreDir = path.resolve(vectorStoreDir);
+    const pathsChangedForSanity =
+      resolvedDocumentsDir !== lastSanityCheckedDocumentsDir ||
+      resolvedVectorStoreDir !== lastSanityCheckedVectorStoreDir;
+    if (!sanityChecksPassed || pathsChangedForSanity) {
       const checkStatus = ctl.createStatus({
         status: "loading",
         text: "Performing sanity checks...",
@@ -202,6 +209,8 @@ export async function preprocess(
         text: "Sanity checks passed",
       });
       sanityChecksPassed = true;
+      lastSanityCheckedDocumentsDir = resolvedDocumentsDir;
+      lastSanityCheckedVectorStoreDir = resolvedVectorStoreDir;
     }
 
     checkAbort(ctl.abortSignal);

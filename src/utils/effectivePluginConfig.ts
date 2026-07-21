@@ -48,9 +48,29 @@ interface ToolsConfigReader {
 
 function chatPathsConfigured(chatConfig: ToolsConfigReader): boolean {
   return (
-    pickNonEmptyString(chatConfig.get("documentsDirectory") as string, "") !== "" ||
+    pickNonEmptyString(chatConfig.get("documentsDirectory") as string, "") !== "" &&
     pickNonEmptyString(chatConfig.get("vectorStoreDirectory") as string, "") !== ""
   );
+}
+
+/**
+ * Prefer a custom synced embedding over the chat schematic default so REST-only
+ * custom models are not clobbered on the first chat message.
+ */
+export function mergeEmbeddingModelPreference(
+  chatEmbedding: string | undefined | null,
+  syncedEmbedding: string | undefined | null,
+): string {
+  const chatResolved: string = resolveEmbeddingModelId(chatEmbedding);
+  const syncedTrimmed: string = (syncedEmbedding ?? "").trim();
+  if (
+    syncedTrimmed !== "" &&
+    resolveEmbeddingModelId(syncedTrimmed) !== DEFAULT_EMBEDDING_MODEL_ID &&
+    chatResolved === DEFAULT_EMBEDDING_MODEL_ID
+  ) {
+    return resolveEmbeddingModelId(syncedTrimmed);
+  }
+  return chatResolved;
 }
 
 function pickFirstNonEmptyString(
@@ -235,7 +255,7 @@ const EMPTY_TOOLS_SETTINGS: ToolsPluginSettings = {
 /** Merge chat settings with synced file, filling any empty chat fields from the sync copy. */
 function mergeChatWithSyncedFallback(
   chatSettings: ToolsPluginSettings,
-  syncedSettings: ToolsPluginSettings | null,
+  syncedSettings: ToolsPluginSettings | ToolsConfigFallbackLayer | null,
 ): ToolsPluginSettings {
   const syncedLayer: ToolsConfigFallbackLayer = syncedSettings ?? {};
   return {
@@ -247,7 +267,7 @@ function mergeChatWithSyncedFallback(
       chatSettings.vectorStoreDirectory,
       syncedLayer.vectorStoreDirectory,
     ),
-    embeddingModel: pickFirstNonEmptyString(
+    embeddingModel: mergeEmbeddingModelPreference(
       chatSettings.embeddingModel,
       syncedLayer.embeddingModel,
     ),
@@ -303,7 +323,9 @@ export function mergeChatAndSyncedFileSettingsForTest(
   const chatSettings: ToolsPluginSettings = {
     documentsDirectory: pickNonEmptyString(chatValues.documentsDirectory as string, ""),
     vectorStoreDirectory: pickNonEmptyString(chatValues.vectorStoreDirectory as string, ""),
-    embeddingModel: DEFAULT_EMBEDDING_MODEL_ID,
+    embeddingModel: resolveEmbeddingModelId(
+      typeof chatValues.embeddingModel === "string" ? chatValues.embeddingModel : undefined,
+    ),
     retrievalLimit: pickNumericSetting(chatValues.retrievalLimit as number | undefined),
     retrievalAffinityThreshold: pickThresholdSetting(
       chatValues.retrievalAffinityThreshold as number | undefined,
@@ -314,10 +336,8 @@ export function mergeChatAndSyncedFileSettingsForTest(
     return {
       documentsDirectory: pickNonEmptyString("", syncedValues.documentsDirectory as string),
       vectorStoreDirectory: pickNonEmptyString("", syncedValues.vectorStoreDirectory as string),
-      embeddingModel: pickFirstNonEmptyString(
-        "",
+      embeddingModel: resolveEmbeddingModelId(
         typeof syncedValues.embeddingModel === "string" ? syncedValues.embeddingModel : undefined,
-        DEFAULT_EMBEDDING_MODEL_ID,
       ),
       retrievalLimit: pickNumericSetting(
         undefined,
@@ -333,7 +353,10 @@ export function mergeChatAndSyncedFileSettingsForTest(
   return mergeChatWithSyncedFallback(chatSettings, {
     documentsDirectory: syncedValues.documentsDirectory as string,
     vectorStoreDirectory: syncedValues.vectorStoreDirectory as string,
-    embeddingModel: DEFAULT_EMBEDDING_MODEL_ID,
+    embeddingModel:
+      typeof syncedValues.embeddingModel === "string"
+        ? syncedValues.embeddingModel
+        : undefined,
     retrievalLimit: pickNumericSetting(syncedValues.retrievalLimit as number | undefined),
     retrievalAffinityThreshold: pickThresholdSetting(
       syncedValues.retrievalAffinityThreshold as number | undefined,

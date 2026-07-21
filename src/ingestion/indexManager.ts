@@ -424,13 +424,13 @@ export class IndexManager {
       }
 
       try {
+        // Drop prior chunks for this path so updates / shorter re-parses leave no orphans.
+        await vectorStore.deleteByFilePath(file.path);
+        fileInventory.set(file.path, new Set());
+
         await vectorStore.addChunks(documentChunks);
         console.log(`Indexed ${documentChunks.length} chunks from ${file.name}`);
-        if (!existingHashes) {
-          fileInventory.set(file.path, new Set([fileHash]));
-        } else {
-          existingHashes.add(fileHash);
-        }
+        fileInventory.set(file.path, new Set([fileHash]));
         await this.failedFileRegistry.clearFailure(file.path);
         return {
           type: "indexed",
@@ -469,12 +469,9 @@ export class IndexManager {
     const { vectorStore } = this.options;
 
     try {
-      const fileHash = await calculateFileHash(filePath);
-      
-      // Delete old chunks
-      await vectorStore.deleteByFileHash(fileHash);
-      
-      // Reindex
+      // Delete all prior hashes for this path, then reindex with the current content hash.
+      await vectorStore.deleteByFilePath(filePath);
+
       const file: ScannedFile = {
         path: filePath,
         name: filePath.split("/").pop() || filePath,
@@ -483,7 +480,7 @@ export class IndexManager {
         size: 0,
         mtime: new Date(),
       };
-      
+
       await this.indexFile(file);
     } catch (error) {
       console.error(`Error reindexing file ${filePath}:`, error);

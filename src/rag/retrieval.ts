@@ -9,6 +9,7 @@ import {
 
 let cachedVectorStore: VectorStore | null = null;
 let lastVectorStoreDir = "";
+let vectorStoreOpenMutex: Promise<void> = Promise.resolve();
 
 function throwIfAborted(abortSignal: AbortSignal | undefined): void {
   if (abortSignal?.aborted) {
@@ -25,20 +26,38 @@ export function getCachedVectorStore(): VectorStore | null {
  */
 export async function ensureVectorStore(vectorStoreDir: string): Promise<VectorStore> {
   const resolvedDir = path.resolve(vectorStoreDir);
-  if (!cachedVectorStore || lastVectorStoreDir !== resolvedDir) {
-    if (cachedVectorStore !== null && lastVectorStoreDir !== resolvedDir) {
-      await cachedVectorStore.close();
-    }
-    cachedVectorStore = new VectorStore(resolvedDir);
-    await cachedVectorStore.initialize();
-    const statsAfterInit = await cachedVectorStore.getStats();
-    if (statsAfterInit.totalChunks === 0) {
-      await deleteEmbeddingIndexManifest(resolvedDir);
-    }
-    console.info(`[BigRAG] Vector store ready (path=${resolvedDir}). Waiting for queries...`);
-    lastVectorStoreDir = resolvedDir;
+
+  let openedStore: VectorStore | null = null;
+  const openWork = vectorStoreOpenMutex
+    .catch((): void => undefined)
+    .then(async (): Promise<void> => {
+      if (cachedVectorStore && lastVectorStoreDir === resolvedDir) {
+        openedStore = cachedVectorStore;
+        return;
+      }
+      if (cachedVectorStore !== null && lastVectorStoreDir !== resolvedDir) {
+        await cachedVectorStore.close();
+      }
+      cachedVectorStore = new VectorStore(resolvedDir);
+      await cachedVectorStore.initialize();
+      const statsAfterInit = await cachedVectorStore.getStats();
+      if (statsAfterInit.totalChunks === 0) {
+        await deleteEmbeddingIndexManifest(resolvedDir);
+      }
+      console.info(`[BigRAG] Vector store ready (path=${resolvedDir}). Waiting for queries...`);
+      lastVectorStoreDir = resolvedDir;
+      openedStore = cachedVectorStore;
+    });
+  vectorStoreOpenMutex = openWork.then(
+    (): void => undefined,
+    (): void => undefined,
+  );
+  await openWork;
+
+  if (openedStore === null) {
+    throw new Error(`Failed to open vector store at ${resolvedDir}`);
   }
-  return cachedVectorStore;
+  return openedStore;
 }
 
 export function summarizeText(text: string, maxLines: number = 3, maxChars: number = 400): string {
@@ -220,9 +239,6 @@ export async function getIndexStatus(
 ): Promise<IndexStatusResult | { error: string }> {
   const { documentsDirectory, vectorStoreDirectory, embeddingModelId } = params;
 
-  if (!documentsDirectory.trim()) {
-    return { error: "Documents directory is not configured." };
-  }
   if (!vectorStoreDirectory.trim()) {
     return { error: "Vector store directory is not configured." };
   }

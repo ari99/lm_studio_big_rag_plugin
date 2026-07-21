@@ -59,35 +59,36 @@ export async function provideTools(ctl: ToolsProviderController): Promise<Tool[]
         return `Error: ${result.message}`;
       }
 
+      // Return a plain object — LM Studio serializes tool results once.
+      // Pre-stringifying caused double-encoded JSON in REST/tool payloads.
       if (result.passages.length === 0) {
-        return JSON.stringify(
-          {
-            query: trimmedQuery,
-            passageCount: 0,
-            passages: [],
-            message: "No relevant content found in indexed documents for this query.",
-          },
-          null,
-          2,
-        );
+        return {
+          query: trimmedQuery,
+          passageCount: 0,
+          passages: [] as Array<{
+            rank: number;
+            fileName: string;
+            filePath: string;
+            score: number;
+            shardName: string;
+            text: string;
+          }>,
+          message: "No relevant content found in indexed documents for this query.",
+        };
       }
 
-      return JSON.stringify(
-        {
-          query: trimmedQuery,
-          passageCount: result.passages.length,
-          passages: result.passages.map((passage, index) => ({
-            rank: index + 1,
-            fileName: passage.fileName,
-            filePath: passage.filePath,
-            score: passage.score,
-            shardName: passage.shardName,
-            text: passage.text,
-          })),
-        },
-        null,
-        2,
-      );
+      return {
+        query: trimmedQuery,
+        passageCount: result.passages.length,
+        passages: result.passages.map((passage, index) => ({
+          rank: index + 1,
+          fileName: passage.fileName,
+          filePath: passage.filePath,
+          score: passage.score,
+          shardName: passage.shardName,
+          text: passage.text,
+        })),
+      };
     },
   });
 
@@ -117,7 +118,7 @@ export async function provideTools(ctl: ToolsProviderController): Promise<Tool[]
         );
       }
 
-      return JSON.stringify(indexStatus, null, 2);
+      return indexStatus;
     },
   });
 
