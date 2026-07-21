@@ -37,15 +37,27 @@ export async function ensureVectorStore(vectorStoreDir: string): Promise<VectorS
       }
       if (cachedVectorStore !== null && lastVectorStoreDir !== resolvedDir) {
         await cachedVectorStore.close();
+        cachedVectorStore = null;
+        lastVectorStoreDir = "";
       }
-      cachedVectorStore = new VectorStore(resolvedDir);
-      await cachedVectorStore.initialize();
-      const statsAfterInit = await cachedVectorStore.getStats();
-      if (statsAfterInit.totalChunks === 0) {
-        await deleteEmbeddingIndexManifest(resolvedDir);
+      const nextStore = new VectorStore(resolvedDir);
+      try {
+        await nextStore.initialize();
+        const statsAfterInit = await nextStore.getStats();
+        if (statsAfterInit.totalChunks === 0) {
+          await deleteEmbeddingIndexManifest(resolvedDir);
+        }
+      } catch (error: unknown) {
+        try {
+          await nextStore.close();
+        } catch {
+          // Ignore close errors after a failed open.
+        }
+        throw error;
       }
-      console.info(`[BigRAG] Vector store ready (path=${resolvedDir}). Waiting for queries...`);
+      cachedVectorStore = nextStore;
       lastVectorStoreDir = resolvedDir;
+      console.info(`[BigRAG] Vector store ready (path=${resolvedDir}). Waiting for queries...`);
       openedStore = cachedVectorStore;
     });
   vectorStoreOpenMutex = openWork.then(

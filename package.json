@@ -13,8 +13,7 @@
     "push": "lms push",
     "bundle:dev": "esbuild .lmstudio/entry.ts --bundle --platform=node --format=cjs --packages=external --outfile=.lmstudio/dev.js",
     "build": "tsc && npm run bundle:dev",
-    "test": "npm run build && node --test dist/tests/parseDocument.test.js dist/tests/fileExcludePatterns.test.js dist/tests/additionalExtensions.test.js dist/tests/retrieval.test.js dist/tests/effectivePluginConfig.test.js dist/openaiProxy/tests/messageMapping.test.js dist/openaiProxy/tests/streamTranslation.test.js dist/openaiProxy/tests/passthrough.test.js",
-    "proxy": "npm run build && node dist/openaiProxy/server.js",
+    "test": "npm run build && node --test dist/tests/parseDocument.test.js dist/tests/fileExcludePatterns.test.js dist/tests/additionalExtensions.test.js dist/tests/retrieval.test.js dist/tests/effectivePluginConfig.test.js",
     "index:cli": "node dist/cliIndex.js",
     "index": "npm run build && node dist/cliIndex.js /Users/user/dev/new_cursor_projects/lmstudio_big_rag/data/original_data/gunsmithing_all /Users/user/dev/new_cursor_projects/lmstudio_big_rag/data/vectorstore"
   },

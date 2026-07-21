@@ -199,18 +199,42 @@ export class VectorStore {
    * Delete all chunks for a source path across all shards (all prior hashes).
    */
   async deleteByFilePath(filePath: string): Promise<void> {
-    const resolvedPath: string = path.resolve(filePath);
+    return this.deleteChunksMatching(
+      (metadata: ChunkMetadata): boolean => this.metadataMatchesFilePath(metadata, filePath),
+      `file path: ${filePath}`,
+    );
+  }
+
+  /**
+   * Delete chunks for a source path whose fileHash is not `keepFileHash`.
+   * Used after a successful add so a failed write cannot wipe the prior index.
+   */
+  async deleteOrphanChunksForFilePath(
+    filePath: string,
+    keepFileHash: string,
+  ): Promise<void> {
     return this.deleteChunksMatching((metadata: ChunkMetadata): boolean => {
-      const itemPath: string = metadata.filePath ?? "";
-      if (itemPath === filePath || itemPath === resolvedPath) {
-        return true;
-      }
-      try {
-        return path.resolve(itemPath) === resolvedPath;
-      } catch {
+      if (!this.metadataMatchesFilePath(metadata, filePath)) {
         return false;
       }
-    }, `file path: ${filePath}`);
+      return metadata.fileHash !== keepFileHash;
+    }, `orphan chunks for file path: ${filePath} (kept hash ${keepFileHash})`);
+  }
+
+  private metadataMatchesFilePath(
+    metadata: ChunkMetadata,
+    filePath: string,
+  ): boolean {
+    const resolvedPath: string = path.resolve(filePath);
+    const itemPath: string = metadata.filePath ?? "";
+    if (itemPath === filePath || itemPath === resolvedPath) {
+      return true;
+    }
+    try {
+      return path.resolve(itemPath) === resolvedPath;
+    } catch {
+      return false;
+    }
   }
 
   private async deleteChunksMatching(

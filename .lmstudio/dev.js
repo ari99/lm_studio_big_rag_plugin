@@ -1992,9 +1992,8 @@ var init_indexManager = __esm({
             return { type: "failed" };
           }
           try {
-            await vectorStore.deleteByFilePath(file.path);
-            fileInventory.set(file.path, /* @__PURE__ */ new Set());
             await vectorStore.addChunks(documentChunks);
+            await vectorStore.deleteOrphanChunksForFilePath(file.path, fileHash);
             console.log(`Indexed ${documentChunks.length} chunks from ${file.name}`);
             fileInventory.set(file.path, /* @__PURE__ */ new Set([fileHash]));
             await this.failedFileRegistry.clearFailure(file.path);
@@ -2031,13 +2030,13 @@ var init_indexManager = __esm({
        * Reindex a specific file (delete old chunks and reindex)
        */
       async reindexFile(filePath) {
-        const { vectorStore } = this.options;
         try {
-          await vectorStore.deleteByFilePath(filePath);
+          const fileName = filePath.split("/").pop() || filePath;
+          const extensionPart = fileName.includes(".") ? fileName.slice(fileName.lastIndexOf(".")) : "";
           const file = {
             path: filePath,
-            name: filePath.split("/").pop() || filePath,
-            extension: filePath.split(".").pop() || "",
+            name: fileName,
+            extension: extensionPart,
             mimeType: false,
             size: 0,
             mtime: /* @__PURE__ */ new Date()
@@ -2244,18 +2243,34 @@ var init_vectorStore = __esm({
        * Delete all chunks for a source path across all shards (all prior hashes).
        */
       async deleteByFilePath(filePath) {
-        const resolvedPath = path6.resolve(filePath);
+        return this.deleteChunksMatching(
+          (metadata) => this.metadataMatchesFilePath(metadata, filePath),
+          `file path: ${filePath}`
+        );
+      }
+      /**
+       * Delete chunks for a source path whose fileHash is not `keepFileHash`.
+       * Used after a successful add so a failed write cannot wipe the prior index.
+       */
+      async deleteOrphanChunksForFilePath(filePath, keepFileHash) {
         return this.deleteChunksMatching((metadata) => {
-          const itemPath = metadata.filePath ?? "";
-          if (itemPath === filePath || itemPath === resolvedPath) {
-            return true;
-          }
-          try {
-            return path6.resolve(itemPath) === resolvedPath;
-          } catch {
+          if (!this.metadataMatchesFilePath(metadata, filePath)) {
             return false;
           }
-        }, `file path: ${filePath}`);
+          return metadata.fileHash !== keepFileHash;
+        }, `orphan chunks for file path: ${filePath} (kept hash ${keepFileHash})`);
+      }
+      metadataMatchesFilePath(metadata, filePath) {
+        const resolvedPath = path6.resolve(filePath);
+        const itemPath = metadata.filePath ?? "";
+        if (itemPath === filePath || itemPath === resolvedPath) {
+          return true;
+        }
+        try {
+          return path6.resolve(itemPath) === resolvedPath;
+        } catch {
+          return false;
+        }
       }
       async deleteChunksMatching(predicate, logLabel) {
         const lastDir = this.shardDirs[this.shardDirs.length - 1];
@@ -2643,15 +2658,26 @@ async function ensureVectorStore(vectorStoreDir) {
     }
     if (cachedVectorStore !== null && lastVectorStoreDir !== resolvedDir) {
       await cachedVectorStore.close();
+      cachedVectorStore = null;
+      lastVectorStoreDir = "";
     }
-    cachedVectorStore = new VectorStore(resolvedDir);
-    await cachedVectorStore.initialize();
-    const statsAfterInit = await cachedVectorStore.getStats();
-    if (statsAfterInit.totalChunks === 0) {
-      await deleteEmbeddingIndexManifest(resolvedDir);
+    const nextStore = new VectorStore(resolvedDir);
+    try {
+      await nextStore.initialize();
+      const statsAfterInit = await nextStore.getStats();
+      if (statsAfterInit.totalChunks === 0) {
+        await deleteEmbeddingIndexManifest(resolvedDir);
+      }
+    } catch (error) {
+      try {
+        await nextStore.close();
+      } catch {
+      }
+      throw error;
     }
-    console.info(`[BigRAG] Vector store ready (path=${resolvedDir}). Waiting for queries...`);
+    cachedVectorStore = nextStore;
     lastVectorStoreDir = resolvedDir;
+    console.info(`[BigRAG] Vector store ready (path=${resolvedDir}). Waiting for queries...`);
     openedStore = cachedVectorStore;
   });
   vectorStoreOpenMutex = openWork.then(
@@ -3358,24 +3384,28 @@ async function provideTools(ctl) {
         return `Error: ${result.message}`;
       }
       if (result.passages.length === 0) {
+        const emptyPassages = [];
         return {
           query: trimmedQuery,
           passageCount: 0,
-          passages: [],
+          passages: emptyPassages,
           message: "No relevant content found in indexed documents for this query."
         };
       }
-      return {
-        query: trimmedQuery,
-        passageCount: result.passages.length,
-        passages: result.passages.map((passage, index) => ({
-          rank: index + 1,
+      const searchPassages = result.passages.map(
+        (passage, passageIndex) => ({
+          rank: passageIndex + 1,
           fileName: passage.fileName,
           filePath: passage.filePath,
           score: passage.score,
           shardName: passage.shardName,
           text: passage.text
-        }))
+        })
+      );
+      return {
+        query: trimmedQuery,
+        passageCount: searchPassages.length,
+        passages: searchPassages
       };
     }
   });

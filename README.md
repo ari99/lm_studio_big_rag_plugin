@@ -167,8 +167,8 @@ CLI equivalents: `BIG_RAG_EXCLUDE_PATTERNS` and `BIG_RAG_ADDITIONAL_EXTENSIONS` 
 
 ### Reindexing Controls
 
-- **Manual Reindex Trigger** (toggle): Turn this ON and submit any chat message to force indexing to run on every chat session where the plugin is enabled. Flip it OFF once you’re done to stop the automatic reindex loop.
-- **Skip Previously Indexed Files** (default: true): If enabled while "Manual Reindex Trigger" is enabled, each manual run touches just the documents that are new or have changed since the last index; if disabled, every chat rebuilds the entire index from scratch. Combine "Skip Previously Indexed Files" and "Manual Reindex Trigger" to choose between incremental updates or repeated full refreshes.
+- **Manual Reindex Trigger** (toggle): Turn ON, then send a chat message to run indexing. It does **not** auto-reset — turn it OFF again when finished, or every subsequent chat with the plugin enabled will reindex.
+- **Skip Previously Indexed Files** (default: true): When Manual Reindex is on, skip unchanged files (hash match). Turn this OFF for a full rebuild of every file.
 - **Automatic First-Run**: If the vector store is empty, the plugin automatically indexes the configured documents the first time any chat message is processed—no manual input is required.
 
 ## Usage
@@ -285,23 +285,16 @@ curl -s http://127.0.0.1:1234/api/v1/chat \
 - **One tool per request** works reliably. Prompts like “first call X, then Y” may fail with `tool_format_generation_error` because smaller models (e.g. Llama 3.1 8B) emit multiple tool calls in one generation block. Run separate curl requests instead.
 - **Large tool outputs**: `big_rag_search` with `limit=10` returns full passage text and can exceed the model context window (e.g. 14848 tokens). Ask for `limit 3` or increase context length in LM Studio.
 - **Permission denied**: enable “Allow calling servers from mcp.json” and use a valid API token.
-- **“Vector store / Documents directory is not configured”**: sync config via a chat message, restore `~/.lmstudio/big-rag-tools-config.json`, or set `BIG_RAG_DOCS_DIR` / `BIG_RAG_DB_DIR`.
-- Prefer `/api/v1/chat` over OpenAI-compatible `/v1/chat/completions` for plugin integrations. LM Studio does not support `integrations` on `/v1/chat/completions`. For OpenAI SDKs, use the proxy that ships **in this package**: `npm run proxy` (see [`OPENAI_PROXY.md`](OPENAI_PROXY.md)), base URL `http://127.0.0.1:1235/v1`.
+- **“Vector store directory is not configured”** (or missing docs path for indexing): sync config via a chat message (both paths set), restore `~/.lmstudio/big-rag-tools-config.json`, or set `BIG_RAG_DOCS_DIR` / `BIG_RAG_DB_DIR`.
 - Use the same **Embedding Model** for indexing and retrieval; reindex after changing models.
 
-### OpenAI-compatible proxy (ships with this plugin)
+### OpenAI-compatible `/v1/chat/completions`
 
-LM Studio does **not** support plugin `integrations` on `/v1/chat/completions`. This package includes a small proxy that rewrites those requests to native `/api/v1/chat` with your Big RAG plugin enabled. Other `/v1/*` routes (models, embeddings, …) are forwarded unchanged to LM Studio.
+LM Studio does **not** support plugin `integrations` on the OpenAI-compatible chat endpoint. That is a platform limitation (not something this plugin can enable).
 
-Prerequisites: same as native REST (app open, plugin installed/configured, token + mcp.json permission as needed).
-
-```bash
-cd big-rag-plugin
-npm run proxy
-# Point OpenAI clients at base_url = http://127.0.0.1:1235/v1
-```
-
-Hub install enables the plugin in LM Studio; start the proxy separately when an OpenAI SDK needs `/v1/chat/completions`. Details and env vars: [`OPENAI_PROXY.md`](OPENAI_PROXY.md).
+- Feature matrix: [LM Studio REST overview](https://lmstudio.ai/docs/developer/rest) (MCP/plugins are unsupported on `/v1/chat/completions`)
+- OpenAI params (no `integrations` field): [Chat Completions](https://lmstudio.ai/docs/developer/openai-compat/chat-completions)
+- Working path: native [`POST /api/v1/chat`](https://lmstudio.ai/docs/developer/rest/chat) with an `integrations` block (examples above)
 
 ## Common Use Cases
 
@@ -368,9 +361,6 @@ Larger **Chunk Size** (1024) and default retrieval settings work well for manual
 7. **Tools Provider** (`src/toolsProvider.ts`):
    - Exposes `big_rag_search` and `big_rag_index_status` for REST API / agent integrations
 
-8. **OpenAI proxy** (`src/openaiProxy/`):
-   - Optional Node process (`npm run proxy`) for OpenAI SDK clients; see [`OPENAI_PROXY.md`](OPENAI_PROXY.md)
-
 ## Performance Considerations
 
 ### Large Datasets
@@ -394,7 +384,7 @@ Larger **Chunk Size** (1024) and default retrieval settings work well for manual
 - Configure **both** paths in the **chat Integrations sidebar**, then send **one chat message** to sync to `~/.lmstudio/big-rag-tools-config.json`.
 - Or set `BIG_RAG_DOCS_DIR` and `BIG_RAG_DB_DIR` on the LM Studio process.
 - Ensure REST uses `"mindstudio/big-rag"` and the plugin is installed (`lms dev --install -y`).
-- `big_rag_index_status` only requires the vector store path; search still needs a usable index (and usually docs paths for indexing).
+- `big_rag_index_status` only requires the **vector store** path; `big_rag_search` needs a usable index (indexing still needs the documents path).
 
 ### REST: `tool_format_generation_error`
 
@@ -473,7 +463,6 @@ big-rag-plugin/
 │   ├── index.ts               # Main entry point
 │   ├── promptPreprocessor.ts  # RAG integration
 │   ├── toolsProvider.ts       # REST tools (search + index status)
-│   ├── openaiProxy/           # OpenAI-compatible proxy (npm run proxy)
 │   ├── rag/
 │   │   └── retrieval.ts       # Shared search / vector store cache
 │   ├── ingestion/
@@ -498,7 +487,6 @@ big-rag-plugin/
 ├── manifest.json              # Plugin manifest
 ├── package.json               # Dependencies
 ├── tsconfig.json              # TypeScript config
-├── OPENAI_PROXY.md            # OpenAI proxy usage
 └── README.md                  # This file
 ```
 
@@ -506,10 +494,9 @@ big-rag-plugin/
 
 See **Manual testing** at the top of this README. Summary:
 
-- `npm test` — unit tests (extensions, parsers, retrieval helpers, OpenAI proxy translators)
+- `npm test` — unit tests (extensions, parsers, retrieval helpers)
 - `npm run dev` + LM Studio chat — E2E UI (dev plugin)
 - `npm run build && lms dev --install -y` + curl to `/api/v1/chat` — E2E REST (installed plugin id `mindstudio/big-rag`; config synced via chat message or env vars)
-- `npm run proxy` — OpenAI-shaped API on port 1235 (requires LM Studio + installed plugin as for REST)
 
 ### Contributing
 

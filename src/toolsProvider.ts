@@ -61,33 +61,40 @@ export async function provideTools(ctl: ToolsProviderController): Promise<Tool[]
 
       // Return a plain object — LM Studio serializes tool results once.
       // Pre-stringifying caused double-encoded JSON in REST/tool payloads.
+      type SearchPassageResult = {
+        rank: number;
+        fileName: string;
+        filePath: string;
+        score: number;
+        shardName: string;
+        text: string;
+      };
+
       if (result.passages.length === 0) {
+        const emptyPassages: SearchPassageResult[] = [];
         return {
           query: trimmedQuery,
           passageCount: 0,
-          passages: [] as Array<{
-            rank: number;
-            fileName: string;
-            filePath: string;
-            score: number;
-            shardName: string;
-            text: string;
-          }>,
+          passages: emptyPassages,
           message: "No relevant content found in indexed documents for this query.",
         };
       }
 
-      return {
-        query: trimmedQuery,
-        passageCount: result.passages.length,
-        passages: result.passages.map((passage, index) => ({
-          rank: index + 1,
+      const searchPassages: SearchPassageResult[] = result.passages.map(
+        (passage, passageIndex) => ({
+          rank: passageIndex + 1,
           fileName: passage.fileName,
           filePath: passage.filePath,
           score: passage.score,
           shardName: passage.shardName,
           text: passage.text,
-        })),
+        }),
+      );
+
+      return {
+        query: trimmedQuery,
+        passageCount: searchPassages.length,
+        passages: searchPassages,
       };
     },
   });

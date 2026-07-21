@@ -424,11 +424,10 @@ export class IndexManager {
       }
 
       try {
-        // Drop prior chunks for this path so updates / shorter re-parses leave no orphans.
-        await vectorStore.deleteByFilePath(file.path);
-        fileInventory.set(file.path, new Set());
-
+        // Upsert new chunks first, then drop other hashes for this path.
+        // Deleting first would wipe the prior index if addChunks failed.
         await vectorStore.addChunks(documentChunks);
+        await vectorStore.deleteOrphanChunksForFilePath(file.path, fileHash);
         console.log(`Indexed ${documentChunks.length} chunks from ${file.name}`);
         fileInventory.set(file.path, new Set([fileHash]));
         await this.failedFileRegistry.clearFailure(file.path);
@@ -466,16 +465,16 @@ export class IndexManager {
    * Reindex a specific file (delete old chunks and reindex)
    */
   async reindexFile(filePath: string): Promise<void> {
-    const { vectorStore } = this.options;
-
     try {
-      // Delete all prior hashes for this path, then reindex with the current content hash.
-      await vectorStore.deleteByFilePath(filePath);
-
+      // indexFile upserts the current hash then drops orphan hashes for this path.
+      const fileName: string = filePath.split("/").pop() || filePath;
+      const extensionPart: string = fileName.includes(".")
+        ? fileName.slice(fileName.lastIndexOf("."))
+        : "";
       const file: ScannedFile = {
         path: filePath,
-        name: filePath.split("/").pop() || filePath,
-        extension: filePath.split(".").pop() || "",
+        name: fileName,
+        extension: extensionPart,
         mimeType: false,
         size: 0,
         mtime: new Date(),
