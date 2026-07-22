@@ -56,7 +56,25 @@ async function main() {
     );
   }
 
-  const client = new LMStudioClient();
+  function resolveLmStudioClientOpts(): {
+	clientIdentifier?: string;
+	clientPasskey?: string;
+  } {
+	const token = process.env.LM_API_TOKEN?.trim();
+	if (!token) return {};
+
+	const match = /^sk-lm-([A-Za-z0-9]{8}):([A-Za-z0-9]{20})$/.exec(token);
+	if (!match) {
+	  throw new Error("LM_API_TOKEN is not a valid LM Studio token (sk-lm-xxxxxxxx:yyyyyyyyyyyyyyyyyyyy)");
+	}
+
+	return {
+	  clientIdentifier: match[1],
+	  clientPasskey: match[2],
+	};
+  }
+
+  const client = new LMStudioClient(resolveLmStudioClientOpts());
 
   console.log("[BigRAG CLI] Initializing vector store...");
   const vectorStore = new VectorStore(vectorStoreDir);
@@ -128,5 +146,3 @@ async function main() {
 }
 
 void main();
-
-
